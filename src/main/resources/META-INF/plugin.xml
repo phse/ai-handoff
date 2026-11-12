@@ -21,13 +21,14 @@
   <li><b>Result back to Claude</b>: exit code and the last lines of output, no copy and paste.</li>
   <li><b>One changelist per task</b>: files Claude changes for a task land in their own changelist "Claude: &lt;task&gt;",
       ready to review and commit on their own.</li>
+  <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one, with a note for Claude.</li>
   <li>Nothing runs without your click.</li>
 </ul>
 
 <h3>Setup</h3>
 <ul>
   <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
-  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_wait_for_result</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
+  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
 </ul>
 
 <p>Works with Claude Code and other MCP clients. Not affiliated with Anthropic.</p>

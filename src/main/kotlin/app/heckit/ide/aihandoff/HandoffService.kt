@@ -19,12 +19,19 @@ class Proposal(
     val risky: Boolean,
     /** Braucht Eingaben (Login, Passwort, Rückfrage) - der Nutzer tippt sie ins Run-Fenster. */
     val interactive: Boolean = false,
+    /** Bilder zum Prüfen bzw. zur Auswahl (dann ist [command] leer und [reason] die Frage). */
+    val images: List<String> = emptyList(),
 ) {
     enum class State { PENDING, RUNNING, FINISHED, DISMISSED }
 
     @Volatile var state: State = State.PENDING
     @Volatile var exitCode: Int? = null
     @Volatile var note: String? = null
+    /** Gewähltes Bild (Index in [images]). */
+    @Volatile var chosen: Int? = null
+    /** Nur Oberfläche: markiertes Bild und angefangene Notiz, damit sie ein Neuzeichnen der Liste überstehen. */
+    @Volatile var selected: Int? = null
+    @Volatile var noteDraft: String = ""
     val output = StringBuffer()
     /** Wird bei FINISHED oder DISMISSED abgeschlossen. */
     val done = CompletableDeferred<Unit>()
@@ -59,6 +66,22 @@ class HandoffService(private val project: Project) : Disposable {
         proposals.add(0, p)
         fireChanged()
         return p
+    }
+
+    fun proposeImages(paths: List<String>, question: String): Proposal {
+        val p = Proposal("h${counter.incrementAndGet()}", "", question, "", false, images = paths)
+        if (paths.size == 1) p.selected = 0
+        proposals.add(0, p)
+        fireChanged()
+        return p
+    }
+
+    fun choose(p: Proposal, index: Int, note: String?) {
+        p.chosen = index
+        p.note = note?.takeIf { it.isNotBlank() }
+        p.state = Proposal.State.FINISHED
+        p.done.complete(Unit)
+        fireChanged()
     }
 
     fun find(id: String): Proposal? = proposals.firstOrNull { it.id == id }

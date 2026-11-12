@@ -26,6 +26,25 @@ import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JPanel
+import javax.swing.Scrollable
+import javax.swing.SwingUtilities
+import java.awt.Rectangle
+import java.awt.Graphics
+import java.awt.Graphics2D
+import java.awt.RenderingHints
+import javax.swing.Icon
+import javax.swing.ImageIcon
+import javax.swing.event.DocumentEvent
+import javax.imageio.ImageIO
+import java.awt.Image
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
+import java.io.File
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.ui.DocumentAdapter
+import com.intellij.ui.components.JBTextField
+import com.intellij.util.ui.WrapLayout
 
 class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
@@ -41,7 +60,14 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
 
 private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
     private val service = HandoffService.getInstance(project)
-    private val list = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(8) }
+    // Folgt der Breite des Fensters, damit Karten (und die Bildreihen darin) umbrechen statt rechts abgeschnitten zu werden.
+    private val list = object : JPanel(), Scrollable {
+        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+        override fun getScrollableUnitIncrement(r: Rectangle, o: Int, d: Int) = JBUI.scale(16)
+        override fun getScrollableBlockIncrement(r: Rectangle, o: Int, d: Int) = r.height
+        override fun getScrollableTracksViewportWidth() = true
+        override fun getScrollableTracksViewportHeight() = false
+    }.apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(8) }
     private val time = SimpleDateFormat("HH:mm")
 
     init {
@@ -68,6 +94,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
     }
 
     private fun card(p: Proposal): JPanel {
+        if (p.images.isNotEmpty()) return imageCard(p)
         val accent = when {
             p.state == Proposal.State.FINISHED && p.exitCode == 0 -> JBColor(0x5A9E6F, 0x5A9E6F)
             p.state == Proposal.State.FINISHED -> JBColor(0xC75450, 0xC75450)
@@ -90,6 +117,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
             add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }
         val reason = JBTextArea(p.reason).apply {
+            font = UIUtil.getLabelFont()
             isEditable = false; lineWrap = true; wrapStyleWord = true; isOpaque = false; border = null
         }
         val editable = p.state == Proposal.State.PENDING
@@ -131,6 +159,143 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
             }, BorderLayout.SOUTH)
         }
         card.maximumSize = Dimension(Int.MAX_VALUE, card.preferredSize.height)
+        return card
+    }
+
+    private val thumbs = HashMap<String, Icon?>()
+
+    private fun thumb(path: String): Icon? = thumbs.getOrPut(path) {
+        runCatching { ImageIO.read(File(path)) }.getOrNull()?.let { img ->
+            val w = JBUI.scale(150)
+            val h = (img.height * w.toDouble() / img.width).toInt().coerceAtMost(JBUI.scale(150))
+            val sw = (img.width * h.toDouble() / img.height).toInt()
+            ImageIcon(img.getScaledInstance(sw, h, Image.SCALE_SMOOTH))
+        }
+    }
+
+    /** Karte mit einem Bild zum Prüfen oder mehreren zur Auswahl. */
+    private fun imageCard(p: Proposal): JPanel {
+        val pending = p.state == Proposal.State.PENDING
+        val accent = when (p.state) {
+            Proposal.State.FINISHED -> JBColor(0x5A9E6F, 0x5A9E6F)
+            Proposal.State.PENDING -> JBColor(0x5A5A8C, 0x8C8CC0)
+            else -> JBColor.border()
+        }
+        val selectedColor = JBColor(0x2A7AA0, 0x5AA8D0)
+        // Höhe hängt von der Breite ab (Bildreihen brechen um) - deshalb bei jedem Layout neu statt einmal festlegen.
+        val card = object : JPanel(BorderLayout(0, JBUI.scale(6))) {
+            override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
+        }.apply {
+            border = JBUI.Borders.compound(RoundedLineBorder(accent, JBUI.scale(8), JBUI.scale(1)), JBUI.Borders.empty(8, 10))
+            alignmentX = LEFT_ALIGNMENT
+        }
+        val single = p.images.size == 1
+        val status = when (p.state) {
+            Proposal.State.PENDING -> if (single) "Review image" else "Choose one of ${p.images.size}"
+            Proposal.State.FINISHED -> if (single) "Approved" else "Chose ${(p.chosen ?: 0) + 1}"
+            else -> "Dismissed"
+        } + (p.note?.let { ": $it" } ?: "")
+        card.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+
+        val grid = JPanel(WrapLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(6))).apply { isOpaque = false }
+        val choose = JButton(if (single) "Approve" else "Choose")
+        fun open(i: Int) = ApplicationManager.getApplication().invokeLater({
+            LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(p.images[i]))
+                ?.let { OpenFileDescriptor(project, it).navigate(true) }
+        }, project.disposed)
+        var paintSelection: () -> Unit = {}
+        val tiles = p.images.mapIndexed { i, path ->
+            val name = File(path).name
+            val label = JBLabel(if (single) name else "${i + 1} · $name", thumb(path), JBLabel.CENTER).apply {
+                verticalTextPosition = JBLabel.BOTTOM; horizontalTextPosition = JBLabel.CENTER
+                font = JBUI.Fonts.smallFont()
+            }
+            // Beim Darüberfahren zeichnet die Kachel oben rechts ein Auge; ein Klick darauf öffnet das Bild groß im
+            // Editor, ein Klick daneben wählt es aus. Selbst gezeichnet statt als Kind-Knopf: dessen Ein- und Ausblenden
+            // per Enter/Exit blieb hängen (mehrere Augen gleichzeitig sichtbar).
+            val eyeIcon = AllIcons.General.InspectionsEye
+            val tile = object : JPanel(BorderLayout()) {
+                var hovered = false
+                fun eyeBounds(): Rectangle {
+                    val pad = JBUI.scale(4)
+                    val size = eyeIcon.iconWidth + 2 * pad
+                    return Rectangle(width - insets.right - size - JBUI.scale(2), insets.top + JBUI.scale(2), size, size)
+                }
+                override fun paintChildren(g: Graphics) {
+                    super.paintChildren(g)
+                    if (!hovered) return
+                    val r = eyeBounds()
+                    val g2 = g.create() as Graphics2D
+                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                    g2.color = JBColor.namedColor("Panel.background", UIUtil.getPanelBackground())
+                    g2.fillRoundRect(r.x, r.y, r.width, r.height, JBUI.scale(6), JBUI.scale(6))
+                    g2.color = JBColor.border()
+                    g2.drawRoundRect(r.x, r.y, r.width - 1, r.height - 1, JBUI.scale(6), JBUI.scale(6))
+                    eyeIcon.paintIcon(this, g2, r.x + (r.width - eyeIcon.iconWidth) / 2, r.y + (r.height - eyeIcon.iconHeight) / 2)
+                    g2.dispose()
+                }
+            }.apply {
+                isOpaque = false
+                add(label, BorderLayout.CENTER)
+                border = JBUI.Borders.empty(4)
+            }
+            val mouse = object : MouseAdapter() {
+                fun hover(on: Boolean) { if (tile.hovered != on) { tile.hovered = on; tile.repaint() } }
+                override fun mouseEntered(e: MouseEvent) = hover(true)
+                override fun mouseExited(e: MouseEvent) = hover(false)
+                override fun mouseMoved(e: MouseEvent) {
+                    hover(true)
+                    tile.toolTipText = if (tile.eyeBounds().contains(e.point)) "Open full size" else null
+                }
+                override fun mouseClicked(e: MouseEvent) {
+                    if (tile.eyeBounds().contains(e.point)) open(i)
+                    else if (pending) { p.selected = i; paintSelection(); choose.isEnabled = true }
+                }
+            }
+            tile.addMouseListener(mouse); tile.addMouseMotionListener(mouse)
+            grid.add(tile)
+            tile
+        }
+        paintSelection = {
+            tiles.forEachIndexed { i, t ->
+                val on = i == (if (pending) p.selected else p.chosen) && !(single && pending)
+                t.border = if (on) JBUI.Borders.compound(RoundedLineBorder(selectedColor, JBUI.scale(6), JBUI.scale(2)), JBUI.Borders.empty(2))
+                           else JBUI.Borders.empty(4)
+                t.revalidate(); t.repaint()
+            }
+        }
+        paintSelection()
+
+        val center = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            val q = JBTextArea(p.reason).apply { font = UIUtil.getLabelFont(); isEditable = false; lineWrap = true; wrapStyleWord = true; isOpaque = false; border = null }
+            listOf(q, grid).forEach { it.alignmentX = LEFT_ALIGNMENT; add(it); add(Box.createVerticalStrut(JBUI.scale(4))) }
+        }
+        card.add(center, BorderLayout.CENTER)
+
+        if (pending) {
+            val note = JBTextField(p.noteDraft).apply {
+                emptyText.text = "Optional note for Claude"
+                document.addDocumentListener(object : DocumentAdapter() {
+                    override fun textChanged(e: DocumentEvent) { p.noteDraft = text }
+                })
+            }
+            choose.isEnabled = p.selected != null
+            choose.putClientProperty("JButton.buttonType", "default")
+            choose.addActionListener { p.selected?.let { service.choose(p, it, note.text) } }
+            val dismiss = JButton("Dismiss").apply { addActionListener { service.dismiss(p, note.text) } }
+            card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+                isOpaque = false
+                add(note, BorderLayout.NORTH)
+                add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                    isOpaque = false; add(choose); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
+                }, BorderLayout.SOUTH)
+            }, BorderLayout.SOUTH)
+        }
         return card
     }
 

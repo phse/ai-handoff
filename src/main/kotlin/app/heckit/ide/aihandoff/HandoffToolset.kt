@@ -72,6 +72,11 @@ class HandoffToolset : McpToolset {
             Proposal.State.PENDING -> "pending: the user has not acted yet."
             Proposal.State.RUNNING -> "running: the command is still running.\nOutput so far:\n${p.outputTail(20)}"
             Proposal.State.DISMISSED -> "dismissed by the user." + (p.note?.let { " Note: $it" } ?: "")
+            Proposal.State.FINISHED if p.images.isNotEmpty() -> buildString {
+                val i = p.chosen ?: 0
+                append(if (p.images.size == 1) "approved by the user." else "the user chose image ${i + 1} of ${p.images.size}: ${p.images[i]}.")
+                p.note?.let { append(" Note: $it") }
+            }
             Proposal.State.FINISHED -> buildString {
                 append("finished with exit code ${p.exitCode}.\n")
                 append("Command run: ${p.command}\n")
@@ -111,5 +116,31 @@ class HandoffToolset : McpToolset {
             ?: return "No task is active."
         return "Task changelist \"$name\" closed, ${files.size} changed file(s)" +
             (if (files.isEmpty()) "." else ":\n" + files.joinToString("\n"))
+    }
+
+    @McpTool
+    @McpDescription(
+        """
+        |Shows images to the user in the IDE's Handoff tool window and asks a question about them: one image to review
+        |(the user approves it or dismisses it with a note), or several variants to choose from (e.g. icon or layout
+        |proposals). Prefer this over opening comparison images. Returns an id; call handoff_wait_for_result with it.
+        """
+    )
+    suspend fun handoff_show_images(
+        @McpDescription("Image files (PNG, JPEG, GIF), absolute or relative to the project root. One to review, several to choose from.")
+        paths: List<String>,
+        @McpDescription("Question for the user, one sentence (e.g. \"Which icon variant should we use?\").")
+        question: String,
+    ): String {
+        val project = currentCoroutineContext().project
+        val base = project.basePath ?: System.getProperty("user.home")
+        val files = paths.map { if (File(it).isAbsolute) File(it) else File(base, it).normalize() }
+        files.firstOrNull { !it.isFile }?.let { return "File not found: ${it.path}" }
+        if (files.isEmpty()) return "No images given."
+        val p = HandoffService.getInstance(project).proposeImages(files.map { it.path }, question.trim())
+        ApplicationManager.getApplication().invokeLater({
+            ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.show()
+        }, project.disposed)
+        return "Shown as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the user's answer."
     }
 }
