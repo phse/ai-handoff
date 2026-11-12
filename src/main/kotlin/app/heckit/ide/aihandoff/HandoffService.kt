@@ -32,6 +32,12 @@ class Proposal(
     /** Nur Oberfläche: markiertes Bild und angefangene Notiz, damit sie ein Neuzeichnen der Liste überstehen. */
     @Volatile var selected: Int? = null
     @Volatile var noteDraft: String = ""
+    /** Markierte Bereiche je Bild (Index in [images]). */
+    val marks = java.util.concurrent.ConcurrentHashMap<Int, List<Mark>>()
+
+    fun marksText(): String = images.indices.filter { !marks[it].isNullOrEmpty() }.joinToString("\n") { i ->
+        "Marked areas on image ${i + 1} (${images[i]}), in pixels of the original image:\n" + MarkupDialog.describe(marks[i]!!)
+    }
     val output = StringBuffer()
     /** Wird bei FINISHED oder DISMISSED abgeschlossen. */
     val done = CompletableDeferred<Unit>()

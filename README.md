@@ -19,7 +19,8 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 - **One changelist per task**: Claude can open the changelist "Claude: <task>" before it edits files. Everything
   changed until the task ends lands there (new files are added to Git), so you review and commit the task on its own.
 - **Images to review or choose from**: Claude shows one image (approve or dismiss) or several variants (pick one),
-  with an optional note. Hover a thumbnail and click the eye to open it full size.
+  with an optional note. Hover a thumbnail: the eye opens it full size, the pencil lets you drag frames on it and add a
+  note per frame; Claude gets the frames in pixels of the original image.
 - Nothing runs without your click.
 
 ## Tools
@@ -30,7 +31,7 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 | `handoff_begin_task` | `title` (a few words) | makes the new changelist `Claude: <title>` the active one |
 | `handoff_end_task` | – | the files changed in the task; makes the previous changelist active again, removes the task's changelist if empty |
 | `handoff_show_images` | `paths` (image files, absolute or relative to the project root), `question` | an `id` at once; one image to approve, several to choose from |
-| `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note, the dismiss note, or `pending` after the timeout (call again to keep waiting) |
+| `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note and marked areas, the dismiss note, or `pending` after the timeout (call again to keep waiting) |
 
 ## Installation
 

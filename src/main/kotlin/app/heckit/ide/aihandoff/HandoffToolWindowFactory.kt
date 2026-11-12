@@ -173,6 +173,15 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         }
     }
 
+    private fun markup(p: Proposal, i: Int) {
+        val img = runCatching { ImageIO.read(File(p.images[i])) }.getOrNull() ?: return
+        val dialog = MarkupDialog(project, "Mark Areas: " + File(p.images[i]).name, img, p.marks[i].orEmpty())
+        if (dialog.showAndGet()) {
+            p.marks[i] = dialog.marks.toList()
+            rebuild()
+        }
+    }
+
     /** Karte mit einem Bild zum Prüfen oder mehreren zur Auswahl. */
     private fun imageCard(p: Proposal): JPanel {
         val pending = p.state == Proposal.State.PENDING
@@ -210,7 +219,9 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         var paintSelection: () -> Unit = {}
         val tiles = p.images.mapIndexed { i, path ->
             val name = File(path).name
-            val label = JBLabel(if (single) name else "${i + 1} · $name", thumb(path), JBLabel.CENTER).apply {
+            val count = p.marks[i]?.size ?: 0
+            val caption = (if (single) name else "${i + 1} · $name") + (if (count > 0) " · $count marked" else "")
+            val label = JBLabel(caption, thumb(path), JBLabel.CENTER).apply {
                 verticalTextPosition = JBLabel.BOTTOM; horizontalTextPosition = JBLabel.CENTER
                 font = JBUI.Fonts.smallFont()
             }
@@ -218,24 +229,29 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
             // Editor, ein Klick daneben wählt es aus. Selbst gezeichnet statt als Kind-Knopf: dessen Ein- und Ausblenden
             // per Enter/Exit blieb hängen (mehrere Augen gleichzeitig sichtbar).
             val eyeIcon = AllIcons.General.InspectionsEye
+            val markIcon = AllIcons.Actions.Edit
             val tile = object : JPanel(BorderLayout()) {
                 var hovered = false
                 fun eyeBounds(): Rectangle {
-                    val pad = JBUI.scale(4)
-                    val size = eyeIcon.iconWidth + 2 * pad
+                    val size = eyeIcon.iconWidth + 2 * JBUI.scale(4)
                     return Rectangle(width - insets.right - size - JBUI.scale(2), insets.top + JBUI.scale(2), size, size)
                 }
-                override fun paintChildren(g: Graphics) {
-                    super.paintChildren(g)
-                    if (!hovered) return
-                    val r = eyeBounds()
-                    val g2 = g.create() as Graphics2D
-                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                /** Stift links vom Auge: Bereiche markieren (nur solange die Karte offen ist). */
+                fun markBounds(): Rectangle? = if (!pending) null else eyeBounds().let { Rectangle(it.x - it.width - JBUI.scale(4), it.y, it.width, it.height) }
+                private fun button(g2: Graphics2D, r: Rectangle, icon: Icon) {
                     g2.color = JBColor.namedColor("Panel.background", UIUtil.getPanelBackground())
                     g2.fillRoundRect(r.x, r.y, r.width, r.height, JBUI.scale(6), JBUI.scale(6))
                     g2.color = JBColor.border()
                     g2.drawRoundRect(r.x, r.y, r.width - 1, r.height - 1, JBUI.scale(6), JBUI.scale(6))
-                    eyeIcon.paintIcon(this, g2, r.x + (r.width - eyeIcon.iconWidth) / 2, r.y + (r.height - eyeIcon.iconHeight) / 2)
+                    icon.paintIcon(this, g2, r.x + (r.width - icon.iconWidth) / 2, r.y + (r.height - icon.iconHeight) / 2)
+                }
+                override fun paintChildren(g: Graphics) {
+                    super.paintChildren(g)
+                    if (!hovered) return
+                    val g2 = g.create() as Graphics2D
+                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                    button(g2, eyeBounds(), eyeIcon)
+                    markBounds()?.let { button(g2, it, markIcon) }
                     g2.dispose()
                 }
             }.apply {
@@ -249,10 +265,15 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
                 override fun mouseExited(e: MouseEvent) = hover(false)
                 override fun mouseMoved(e: MouseEvent) {
                     hover(true)
-                    tile.toolTipText = if (tile.eyeBounds().contains(e.point)) "Open full size" else null
+                    tile.toolTipText = when {
+                        tile.eyeBounds().contains(e.point) -> "Open full size"
+                        tile.markBounds()?.contains(e.point) == true -> "Mark areas and add notes for Claude"
+                        else -> null
+                    }
                 }
                 override fun mouseClicked(e: MouseEvent) {
                     if (tile.eyeBounds().contains(e.point)) open(i)
+                    else if (tile.markBounds()?.contains(e.point) == true) markup(p, i)
                     else if (pending) { p.selected = i; paintSelection(); choose.isEnabled = true }
                 }
             }

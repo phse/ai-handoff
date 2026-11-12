@@ -71,11 +71,13 @@ class HandoffToolset : McpToolset {
         return when (p.state) {
             Proposal.State.PENDING -> "pending: the user has not acted yet."
             Proposal.State.RUNNING -> "running: the command is still running.\nOutput so far:\n${p.outputTail(20)}"
-            Proposal.State.DISMISSED -> "dismissed by the user." + (p.note?.let { " Note: $it" } ?: "")
+            Proposal.State.DISMISSED -> "dismissed by the user." + (p.note?.let { " Note: $it" } ?: "") +
+                (p.marksText().takeIf { it.isNotEmpty() }?.let { "\n$it" } ?: "")
             Proposal.State.FINISHED if p.images.isNotEmpty() -> buildString {
                 val i = p.chosen ?: 0
                 append(if (p.images.size == 1) "approved by the user." else "the user chose image ${i + 1} of ${p.images.size}: ${p.images[i]}.")
                 p.note?.let { append(" Note: $it") }
+                p.marksText().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
             }
             Proposal.State.FINISHED -> buildString {
                 append("finished with exit code ${p.exitCode}.\n")
@@ -122,7 +124,7 @@ class HandoffToolset : McpToolset {
     @McpDescription(
         """
         |Shows images to the user in the IDE's Handoff tool window and asks a question about them: one image to review
-        |(the user approves it or dismisses it with a note), or several variants to choose from (e.g. icon or layout
+        |(the user approves it or dismisses it with a note and can mark areas on it), or several variants to choose from (e.g. icon or layout
         |proposals). Prefer this over opening comparison images. Returns an id; call handoff_wait_for_result with it.
         """
     )
