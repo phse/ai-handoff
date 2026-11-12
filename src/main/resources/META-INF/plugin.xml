@@ -37,6 +37,8 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.mcpServer</depends>
     <depends>com.intellij.modules.vcs</depends>
+    <!-- Ab 2026.3 liegt die VCS-API (ChangeListManager) im eigenen Plugin; sonst meldet der Verifier sie als fehlend. -->
+    <depends optional="true" config-file="handoff-vcs.xml">com.intellij.platform.vcs</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <iconMapper mappingFile="HandoffIconMappings.json"/>
