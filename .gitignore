@@ -1,0 +1,19 @@
+.gradle/
+.kotlin/
+build/
+.intellijPlatform/
+.idea/
+*.iml
+out/
+local.properties
+.DS_Store
+
+# Logo-Entwürfe bleiben lokal
+marketplace/icon-proposals/
+
+# Zukunftspläne und Persönliches bleiben lokal
+ROADMAP.md
+CLAUDE.md
+
+# Lokaler Zustand der cf-CLI
+.cloudflare/

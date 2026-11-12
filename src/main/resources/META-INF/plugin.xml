@@ -1,0 +1,45 @@
+<idea-plugin>
+    <id>app.heckit.ide.aihandoff</id>
+    <name>Handoff for Claude Code</name>
+    <vendor url="https://heckit.app">heck\it</vendor>
+
+    <description><![CDATA[
+<p>
+  <b>Handoff</b> is the place where Claude Code hands work over to you, and you hand the result back.
+</p>
+<p>
+  Some steps an AI agent should not run on its own: deploys, logins, releases, uploads. Instead of copying a command out of the chat,
+  running it somewhere and pasting the output back, Claude proposes it through the IDE's MCP server. It shows up in the
+  <b>Handoff</b> tool window with the reason and the working directory. Run it, edit it first or dismiss it; exit code and output go
+  straight back to Claude.
+</p>
+
+<h3>Features</h3>
+<ul>
+  <li><b>Proposed commands</b> with reason and working directory, risky ones (deploy, push, publish, delete) highlighted.</li>
+  <li><b>One click to run</b>, output in the Run tool window. Edit the command before running, or dismiss it with a note for Claude.</li>
+  <li><b>Result back to Claude</b>: exit code and the last lines of output, no copy and paste.</li>
+  <li>Nothing runs without your click.</li>
+</ul>
+
+<h3>Setup</h3>
+<ul>
+  <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
+  <li>Claude Code then sees the tools <code>handoff_propose_command</code> and <code>handoff_wait_for_result</code>.</li>
+</ul>
+
+<p>Works with Claude Code and other MCP clients. Not affiliated with Anthropic.</p>
+<p>You can support it via <a href="https://github.com/sponsors/phse">GitHub Sponsors</a> or buy me a coffee on <a href="https://ko-fi.com/phse_de">Ko-fi</a>.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.mcpServer</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <iconMapper mappingFile="HandoffIconMappings.json"/>
+        <toolWindow id="Handoff" anchor="right" icon="/icons/handoff.svg" canCloseContents="false"
+                    factoryClass="app.heckit.ide.aihandoff.HandoffToolWindowFactory"/>
+        <mcpServer.mcpToolset implementation="app.heckit.ide.aihandoff.HandoffToolset"/>
+        <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
+    </extensions>
+</idea-plugin>

@@ -1,0 +1,12 @@
+// Runners Bar (https://plugins.jetbrains.com/plugin/34701-runners-bar): these runners appear as tabs in the IDE.
+{
+  "groups": [
+    {
+      "name": "Plugin",
+      "runners": [
+        { "name": "Sandbox", "command": "./gradlew runIde", "terminal": false },
+        { "name": "Publish", "command": "./gradlew publishPlugin", "terminal": false }
+      ]
+    }
+  ]
+}
