@@ -50,9 +50,22 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
         val content = ContentFactory.getInstance().createContent(panel, "Commands", false)
         content.setDisposer(panel)
         toolWindow.contentManager.addContent(content)
-        toolWindow.setTitleActions(listOf(object : AnAction("Clear Finished", null, AllIcons.Actions.GC), DumbAware {
-            override fun actionPerformed(e: AnActionEvent) = HandoffService.getInstance(project).clearFinished()
-        }))
+        val memory = MemoryPanel(project)
+        toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(memory, "Memory", false).apply { setDisposer(memory) })
+        // Je Reiter passende Kopfzeilen-Aktion: Aufräumen bei den Befehlen, Neu einlesen beim Memory.
+        fun isMemory() = toolWindow.contentManager.selectedContent?.component === memory
+        toolWindow.setTitleActions(listOf(
+            object : AnAction("Clear Finished", null, AllIcons.Actions.GC), DumbAware {
+                override fun update(e: AnActionEvent) { e.presentation.isVisible = !isMemory() }
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = HandoffService.getInstance(project).clearFinished()
+            },
+            object : AnAction("Reload", null, AllIcons.Actions.Refresh), DumbAware {
+                override fun update(e: AnActionEvent) { e.presentation.isVisible = isMemory() }
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = memory.refresh()
+            },
+        ))
     }
 }
 
