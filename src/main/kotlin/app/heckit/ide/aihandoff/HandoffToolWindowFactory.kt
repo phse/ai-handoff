@@ -40,8 +40,6 @@ import java.awt.Image
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.io.File
-import com.intellij.openapi.fileEditor.OpenFileDescriptor
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.WrapLayout
@@ -173,11 +171,20 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         }
     }
 
-    private fun markup(p: Proposal, i: Int) {
-        val img = runCatching { ImageIO.read(File(p.images[i])) }.getOrNull() ?: return
-        val dialog = MarkupDialog(project, "Mark Areas: " + File(p.images[i]).name, img, p.marks[i].orEmpty())
-        if (dialog.showAndGet()) {
-            p.marks[i] = dialog.marks.toList()
+    /** Bilder groß zeigen (Pfeiltasten blättern); solange die Karte offen ist, mit Rahmen und Notizen. */
+    private fun openInEditor(path: String) {
+        // Aus dem MouseListener ohne Write-Intent-Lock - deshalb per invokeLater.
+        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+            val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByPath(path) ?: return@invokeLater
+            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf).navigate(true)
+        }
+    }
+
+    private fun viewer(p: Proposal, i: Int) {
+        val editable = p.state == Proposal.State.PENDING
+        val dialog = MarkupDialog(project, p.images, i, HashMap(p.marks), editable)
+        if (dialog.showAndGet() && editable) {
+            dialog.allMarks.forEach { (k, v) -> if (v.isEmpty()) p.marks.remove(k) else p.marks[k] = v.toList() }
             rebuild()
         }
     }
@@ -212,10 +219,6 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
 
         val grid = JPanel(WrapLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(6))).apply { isOpaque = false }
         val choose = JButton(if (single) "Approve" else "Choose")
-        fun open(i: Int) = ApplicationManager.getApplication().invokeLater({
-            LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(p.images[i]))
-                ?.let { OpenFileDescriptor(project, it).navigate(true) }
-        }, project.disposed)
         var paintSelection: () -> Unit = {}
         val tiles = p.images.mapIndexed { i, path ->
             val name = File(path).name
@@ -229,15 +232,15 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
             // Editor, ein Klick daneben wählt es aus. Selbst gezeichnet statt als Kind-Knopf: dessen Ein- und Ausblenden
             // per Enter/Exit blieb hängen (mehrere Augen gleichzeitig sichtbar).
             val eyeIcon = AllIcons.General.InspectionsEye
-            val markIcon = AllIcons.Actions.Edit
+            val openIcon = AllIcons.Actions.MoveToWindow
             val tile = object : JPanel(BorderLayout()) {
                 var hovered = false
                 fun eyeBounds(): Rectangle {
                     val size = eyeIcon.iconWidth + 2 * JBUI.scale(4)
                     return Rectangle(width - insets.right - size - JBUI.scale(2), insets.top + JBUI.scale(2), size, size)
                 }
-                /** Stift links vom Auge: Bereiche markieren (nur solange die Karte offen ist). */
-                fun markBounds(): Rectangle? = if (!pending) null else eyeBounds().let { Rectangle(it.x - it.width - JBUI.scale(4), it.y, it.width, it.height) }
+                /** Links neben dem Auge: Bild im Editor öffnen. */
+                fun openBounds(): Rectangle = eyeBounds().let { Rectangle(it.x - it.width - JBUI.scale(3), it.y, it.width, it.height) }
                 private fun button(g2: Graphics2D, r: Rectangle, icon: Icon) {
                     g2.color = JBColor.namedColor("Panel.background", UIUtil.getPanelBackground())
                     g2.fillRoundRect(r.x, r.y, r.width, r.height, JBUI.scale(6), JBUI.scale(6))
@@ -251,7 +254,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
                     val g2 = g.create() as Graphics2D
                     g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
                     button(g2, eyeBounds(), eyeIcon)
-                    markBounds()?.let { button(g2, it, markIcon) }
+                    button(g2, openBounds(), openIcon)
                     g2.dispose()
                 }
             }.apply {
@@ -265,15 +268,13 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
                 override fun mouseExited(e: MouseEvent) = hover(false)
                 override fun mouseMoved(e: MouseEvent) {
                     hover(true)
-                    tile.toolTipText = when {
-                        tile.eyeBounds().contains(e.point) -> "Open full size"
-                        tile.markBounds()?.contains(e.point) == true -> "Mark areas and add notes for Claude"
-                        else -> null
-                    }
+                    tile.toolTipText = if (tile.openBounds().contains(e.point)) "Open in editor"
+                        else if (!tile.eyeBounds().contains(e.point)) null
+                        else if (pending) "View full size, mark areas for Claude (← → to switch images)" else "View full size"
                 }
                 override fun mouseClicked(e: MouseEvent) {
-                    if (tile.eyeBounds().contains(e.point)) open(i)
-                    else if (tile.markBounds()?.contains(e.point) == true) markup(p, i)
+                    if (tile.openBounds().contains(e.point)) openInEditor(p.images[i])
+                    else if (tile.eyeBounds().contains(e.point)) viewer(p, i)
                     else if (pending) { p.selected = i; paintSelection(); choose.isEnabled = true }
                 }
             }
