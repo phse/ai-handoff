@@ -16,6 +16,8 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   and aliases are there. The command can be edited before running.
 - **Dismiss…** drops it, optionally with a note for Claude (e.g. "I'll do that tomorrow").
 - **Result back to Claude**: exit code and the last 60 lines of output. After the run the card turns green or red.
+- **One changelist per task**: Claude can open the changelist "Claude: <task>" before it edits files. Everything
+  changed until the task ends lands there (new files are added to Git), so you review and commit the task on its own.
 - Nothing runs without your click.
 
 ## Tools
@@ -23,6 +25,8 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 | Tool | Parameters | Returns |
 |---|---|---|
 | `handoff_propose_command` | `command` (string), `reason` (string, one sentence), `workingDirectory` (absolute or relative to the project root, empty = root), `risky` (boolean, default `false`) | an `id` at once; opens the tool window |
+| `handoff_begin_task` | `title` (a few words) | makes the new changelist `Claude: <title>` the active one |
+| `handoff_end_task` | – | the files changed in the task; makes the previous changelist active again, removes the task's changelist if empty |
 | `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the dismiss note, or `pending` after the timeout (call again to keep waiting) |
 
 ## Installation

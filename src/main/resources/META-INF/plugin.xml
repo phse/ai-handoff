@@ -19,13 +19,15 @@
   <li><b>Proposed commands</b> with reason and working directory, risky ones (deploy, push, publish, delete) highlighted.</li>
   <li><b>One click to run</b>, output in the Run tool window. Edit the command before running, or dismiss it with a note for Claude.</li>
   <li><b>Result back to Claude</b>: exit code and the last lines of output, no copy and paste.</li>
+  <li><b>One changelist per task</b>: files Claude changes for a task land in their own changelist "Claude: &lt;task&gt;",
+      ready to review and commit on their own.</li>
   <li>Nothing runs without your click.</li>
 </ul>
 
 <h3>Setup</h3>
 <ul>
   <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
-  <li>Claude Code then sees the tools <code>handoff_propose_command</code> and <code>handoff_wait_for_result</code>.</li>
+  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_wait_for_result</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
 </ul>
 
 <p>Works with Claude Code and other MCP clients. Not affiliated with Anthropic.</p>
@@ -34,6 +36,7 @@
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.mcpServer</depends>
+    <depends>com.intellij.modules.vcs</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <iconMapper mappingFile="HandoffIconMappings.json"/>

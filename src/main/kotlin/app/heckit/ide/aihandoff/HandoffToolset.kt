@@ -6,7 +6,10 @@ import com.intellij.mcpserver.annotations.McpTool
 import com.intellij.mcpserver.project
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.openapi.application.EDT
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
@@ -76,5 +79,37 @@ class HandoffToolset : McpToolset {
                 append(p.outputTail())
             }
         }
+    }
+
+    @McpTool
+    @McpDescription(
+        """
+        |Starts a task: creates the VCS changelist "Claude: <title>" and makes it the active one, so every file changed from
+        |now on lands there and the user can review and commit the task on its own. Call it before editing files for a new
+        |task; call handoff_end_task when the task is done.
+        """
+    )
+    suspend fun handoff_begin_task(
+        @McpDescription("Short task title, a few words (e.g. \"Fix login redirect\").")
+        title: String,
+    ): String {
+        val project = currentCoroutineContext().project
+        val name = TaskChangelists.getInstance(project).begin(title)
+        return "Changelist \"$name\" is now active. Call handoff_end_task when the task is done."
+    }
+
+    @McpTool
+    @McpDescription(
+        """
+        |Ends the task started with handoff_begin_task: makes the previously active changelist active again and returns
+        |the files changed in the task's changelist.
+        """
+    )
+    suspend fun handoff_end_task(): String {
+        val project = currentCoroutineContext().project
+        val (name, files) = TaskChangelists.getInstance(project).end()
+            ?: return "No task is active."
+        return "Task changelist \"$name\" closed, ${files.size} changed file(s)" +
+            (if (files.isEmpty()) "." else ":\n" + files.joinToString("\n"))
     }
 }
