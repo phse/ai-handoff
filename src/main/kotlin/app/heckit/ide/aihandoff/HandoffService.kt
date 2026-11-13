@@ -52,7 +52,9 @@ class Proposal(
 }
 
 @Service(Service.Level.PROJECT)
-class HandoffService(private val project: Project) : Disposable {
+// Bewusst kein Disposable: Wird der Dienst während eines Plugin-Updates noch einmal angelegt (z. B. von einem späten
+// MCP-Aufruf), hielt ihn sonst der Disposer der IDE fest und mit ihm die alte Plugin-Version (Heap-Analyse, 2026-11-13).
+class HandoffService(private val project: Project) {
     fun interface Listener : EventListener {
         fun changed()
     }
@@ -102,10 +104,6 @@ class HandoffService(private val project: Project) : Disposable {
     fun clearFinished() {
         proposals.removeIf { it.state == Proposal.State.FINISHED || it.state == Proposal.State.DISMISSED }
         fireChanged()
-    }
-
-    override fun dispose() {
-        proposals.forEach { it.done.complete(Unit) }
     }
 
     companion object {

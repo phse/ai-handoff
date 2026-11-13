@@ -45,6 +45,42 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.WrapLayout
 
 class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
+    /**
+     * Fenster-Icon per Datei-Adresse statt per Pfad in der plugin.xml. Ein pfadbasiertes Icon hängt an unserem Classloader,
+     * und die IDE behält es nach einem Plugin-Update bis zu 10 min im Speicher für ausgegraute Icons (iconToDisabledIcon wird
+     * beim Entladen nicht geleert) - dann bleibt die alte Plugin-Version geladen. Ohne Classloader findet die IDE aber keine
+     * Varianten mehr; deshalb wählen wir Größe (neue Oberfläche 16/20 px, alte 13 px) und hell/dunkel selbst.
+     */
+    /**
+     * Icon als Datei im Temp-Ordner der IDE: Eine jar-URL lieferte nach einem Hot-Reload kein Bild mehr (die JAR wird unter
+     * gleichem Namen ersetzt, der Zip-Cache der IDE kennt noch die alte). Die Datei-URL hängt weder an JAR noch Classloader.
+     */
+    private fun iconUrl(path: String): java.net.URL? = runCatching {
+        val bytes = javaClass.getResourceAsStream(path)?.use { it.readBytes() } ?: return null
+        val dir = java.io.File(com.intellij.openapi.application.PathManager.getTempPath(), "handoff-icons").apply { mkdirs() }
+        // Name aus Inhalt, damit eine geänderte Grafik nicht aus einem Cache der alten Datei kommt.
+        val file = java.io.File(dir, path.substringAfterLast('/').removeSuffix(".svg") + "-" + bytes.contentHashCode().toUInt().toString(16) + ".svg")
+        if (!file.isFile) file.writeBytes(bytes)
+        file.toURI().toURL()
+    }.getOrNull()
+
+    override fun init(toolWindow: ToolWindow) {
+        fun update() {
+            // Theme über den LafManager - JBColor.isBright() ist beim frühen init() noch nicht gesetzt (lieferte "dunkel").
+            val isDark = com.intellij.ide.ui.LafManager.getInstance().currentUIThemeLookAndFeel?.isDark ?: !JBColor.isBright()
+            val dark = if (isDark) "_dark" else ""
+            val path = if (com.intellij.ui.NewUI.isEnabled()) {
+                val size = JBUI.CurrentTheme.Toolbar.stripeToolbarButtonIconSize()
+                if (size >= 20) "/icons/expui/toolwindow/handoff@20x20$dark.svg" else "/icons/expui/toolwindow/handoff$dark.svg"
+            } else "/icons/handoff$dark.svg"
+            iconUrl(path)?.let { url -> com.intellij.openapi.util.IconLoader.findIcon(url, false)?.let { toolWindow.setIcon(it) } }
+        }
+        update()
+        val bus = ApplicationManager.getApplication().messageBus.connect(toolWindow.disposable)
+        bus.subscribe(com.intellij.ide.ui.LafManagerListener.TOPIC, com.intellij.ide.ui.LafManagerListener { update() })
+        bus.subscribe(com.intellij.ide.ui.UISettingsListener.TOPIC, com.intellij.ide.ui.UISettingsListener { update() })
+    }
+
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val panel = HandoffPanel(project)
         val content = ContentFactory.getInstance().createContent(panel, "Commands", false)
