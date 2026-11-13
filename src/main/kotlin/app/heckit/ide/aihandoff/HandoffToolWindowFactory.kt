@@ -48,7 +48,7 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
     /**
      * Fenster-Icon per Datei-Adresse statt per Pfad in der plugin.xml. Ein pfadbasiertes Icon hängt an unserem Classloader,
      * und die IDE behält es nach einem Plugin-Update bis zu 10 min im Speicher für ausgegraute Icons (iconToDisabledIcon wird
-     * beim Entladen nicht geleert) - dann bleibt die alte Plugin-Version geladen. Ohne Classloader findet die IDE aber keine
+     * beim Entladen nicht geleert, IJPL-252580, behoben ab 2027.1) - dann bleibt die alte Plugin-Version geladen. Ohne Classloader findet die IDE aber keine
      * Varianten mehr; deshalb wählen wir Größe (neue Oberfläche 16/20 px, alte 13 px) und hell/dunkel selbst.
      */
     /**
