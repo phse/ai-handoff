@@ -46,41 +46,9 @@ class MemoryPanel(private val project: Project) : JPanel(BorderLayout()), Dispos
     private val summary = JBLabel().apply { foreground = UIUtil.getContextHelpForeground() }
     private val root = javax.swing.tree.DefaultMutableTreeNode()
     private val model = javax.swing.tree.DefaultTreeModel(root)
-    // Kennzahlen (Tokens, Typ) stehen fest am rechten Rand des sichtbaren Bereichs - gezeichnet über dem Text,
-    // mit Hintergrund dahinter, damit lange Pfade darunter verschwinden statt waagerecht zu scrollen.
-    private val tree = object : com.intellij.ui.treeStructure.Tree(model) {
-        override fun paintComponent(g: java.awt.Graphics) {
-            super.paintComponent(g)
-            val g2 = g.create() as java.awt.Graphics2D
-            g2.setRenderingHint(java.awt.RenderingHints.KEY_TEXT_ANTIALIASING, java.awt.RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
-            // Kennzahlen etwas kräftiger, damit sie neben den grauen Zusätzen hervorstechen.
-            val metaFont = JBUI.Fonts.smallFont().deriveFont(java.awt.Font.BOLD)
-            val vis = visibleRect
-            val pad = JBUI.scale(8)
-            for (row in 0 until rowCount) {
-                val b = getRowBounds(row) ?: continue
-                if (b.y > vis.y + vis.height || b.y + b.height < vis.y) continue
-                val n = (getPathForRow(row).lastPathComponent as? javax.swing.tree.DefaultMutableTreeNode)?.userObject as? Node ?: continue
-                if (n.meta.isEmpty()) continue
-                g2.font = if (n.kind == Kind.REFERENCE || n.kind == Kind.INFO) JBUI.Fonts.smallFont() else metaFont
-                val fm = g2.fontMetrics
-                val w = fm.stringWidth(n.meta)
-                val x = vis.x + vis.width - w - pad
-                val selected = isRowSelected(row)
-                g2.color = if (selected) com.intellij.util.ui.UIUtil.getTreeSelectionBackground(hasFocus()) else background
-                g2.fillRect(x - pad, b.y, w + 2 * pad, b.height)
-                g2.color = if (selected) com.intellij.util.ui.UIUtil.getTreeSelectionForeground(hasFocus())
-                    else if (n.kind == Kind.REFERENCE || n.kind == Kind.INFO) UIUtil.getContextHelpForeground() else UIUtil.getLabelForeground()
-                g2.drawString(n.meta, x, b.y + (b.height + fm.ascent - fm.descent) / 2)
-            }
-            g2.dispose()
-        }
+    private val tree = MetaTree(model) { o ->
+        (o as? Node)?.takeIf { it.meta.isNotEmpty() }?.let { it.meta to (it.kind != Kind.REFERENCE && it.kind != Kind.INFO) }
     }.apply {
-        isRootVisible = false; showsRootHandles = true
-        // Doppelklick öffnet nur die Datei; auf- und zuklappen über den Pfeil (bzw. ← →).
-        toggleClickCount = 0
-        // Keine aufgeklappte Vollzeile beim Darüberfahren - sie läuft unter den Kennzahlen weiter; der Pfad steht im Tooltip.
-        setExpandableItemsEnabled(false)
         cellRenderer = Renderer()
     }
     private val alarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)

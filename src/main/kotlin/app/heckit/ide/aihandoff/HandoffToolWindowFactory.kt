@@ -52,8 +52,17 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
         toolWindow.contentManager.addContent(content)
         val memory = MemoryPanel(project)
         toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(memory, "Memory", false).apply { setDisposer(memory) })
+        val usage = UsagePanel(project)
+        toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(usage, "Usage", false).apply { setDisposer(usage) })
         // Je Reiter passende Kopfzeilen-Aktion: Aufräumen bei den Befehlen, Neu einlesen beim Memory.
-        fun isMemory() = toolWindow.contentManager.selectedContent?.component === memory
+        // Usage beim Öffnen des Reiters neu einlesen (neue Antworten seit dem letzten Blick).
+        toolWindow.contentManager.addContentManagerListener(object : com.intellij.ui.content.ContentManagerListener {
+            override fun selectionChanged(event: com.intellij.ui.content.ContentManagerEvent) {
+                if (event.operation == com.intellij.ui.content.ContentManagerEvent.ContentOperation.add && event.content.component === usage) usage.refresh()
+            }
+        })
+        fun selected() = toolWindow.contentManager.selectedContent?.component
+        fun isMemory() = selected() === memory || selected() === usage
         toolWindow.setTitleActions(listOf(
             object : AnAction("Clear Finished", null, AllIcons.Actions.GC), DumbAware {
                 override fun update(e: AnActionEvent) { e.presentation.isVisible = !isMemory() }
@@ -63,7 +72,7 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
             object : AnAction("Reload", null, AllIcons.Actions.Refresh), DumbAware {
                 override fun update(e: AnActionEvent) { e.presentation.isVisible = isMemory() }
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
-                override fun actionPerformed(e: AnActionEvent) = memory.refresh()
+                override fun actionPerformed(e: AnActionEvent) = if (selected() === usage) usage.refresh() else memory.refresh()
             },
         ))
     }
