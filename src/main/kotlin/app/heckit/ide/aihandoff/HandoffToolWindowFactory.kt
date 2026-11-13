@@ -110,6 +110,10 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
                 override fun actionPerformed(e: AnActionEvent) = if (selected() === usage) usage.refresh() else memory.refresh()
             },
+            object : AnAction("Guide", "Setup, a CLAUDE.md prompt per feature and what's new", AllIcons.Actions.Help), DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = Guide.open(project)
+            },
         ))
     }
 }
@@ -128,18 +132,14 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
 
     init {
         add(JBScrollPane(list).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
+        Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
         service.addListener({ rebuild() }, this)
         rebuild()
     }
 
     private fun rebuild() {
         list.removeAll()
-        if (service.proposals.isEmpty()) {
-            list.add(JBLabel(
-                "<html><b>No commands yet.</b><br><br>When Claude Code wants you to run a command yourself (deploy, login, release), " +
-                    "it shows up here. Requires the IDE's MCP server (Settings | Tools | MCP Server) connected to Claude Code.</html>"
-            ).apply { foreground = UIUtil.getContextHelpForeground(); alignmentX = LEFT_ALIGNMENT })
-        }
+        if (service.proposals.isEmpty()) list.add(emptyState())
         service.proposals.forEach {
             list.add(card(it))
             list.add(Box.createVerticalStrut(JBUI.scale(8)))
@@ -147,6 +147,52 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         list.add(Box.createVerticalGlue())
         list.revalidate()
         list.repaint()
+    }
+
+    private fun link(text: String, action: () -> Unit) =
+        com.intellij.ui.components.ActionLink(text) { action() }.apply { alignmentX = LEFT_ALIGNMENT }
+
+    /** Einrichtung, solange keine Karte da ist - so sieht man sie gleich nach der Installation. */
+    private fun emptyState() = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false; alignmentX = LEFT_ALIGNMENT
+        fun text(html: String) = JBLabel("<html>$html</html>").apply { alignmentX = LEFT_ALIGNMENT }
+        add(text("<b>No commands yet.</b>"))
+        add(Box.createVerticalStrut(JBUI.scale(6)))
+        add(text("When Claude Code wants you to run a command yourself (deploy, login, release) or to review images, it shows up here.")
+            .apply { foreground = UIUtil.getContextHelpForeground() })
+        add(Box.createVerticalStrut(JBUI.scale(12)))
+        add(text("<b>Setup</b>"))
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        add(text("1. Enable the IDE's MCP server."))
+        add(link("Open MCP Server settings") { Guide.openMcpSettings(project) }.apply { border = JBUI.Borders.emptyLeft(14) })
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        add(text("2. Connect Claude Code: <i>Auto-Configure</i> on the same page, or <code>/mcp</code> in Claude Code."))
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        add(text("3. Tell Claude when to use Handoff: add the snippet to your CLAUDE.md."))
+        add(link("Copy CLAUDE.md Snippet") {
+            Guide.copySnippet()
+            com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(
+                "Copied. Paste it into ~/.claude/CLAUDE.md or the project's CLAUDE.md.", com.intellij.openapi.ui.MessageType.INFO, null
+            ).setFadeoutTime(3000).createBalloon().show(
+                com.intellij.ui.awt.RelativePoint.getSouthOf(this), com.intellij.openapi.ui.popup.Balloon.Position.below)
+        }.apply { border = JBUI.Borders.emptyLeft(14) })
+        add(Box.createVerticalStrut(JBUI.scale(12)))
+        add(link("Show Full Guide") { Guide.open(project) })
+    }
+
+    /** Einzeiliger Hinweis nach einem Update, bis er weggeklickt oder die Anleitung geöffnet wird. */
+    private fun newsBanner(version: String, news: String): JPanel {
+        val banner = JPanel(BorderLayout(JBUI.scale(8), 0))
+        fun close() { Guide.markNewsSeen(); remove(banner); revalidate(); repaint() }
+        banner.border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(6, 10))
+        banner.background = JBColor.namedColor("Banner.infoBackground", JBColor(0xF5F8FE, 0x25324D))
+        banner.add(JBLabel("<html><b>New in $version:</b> ${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(news.replace("**", ""))}</html>"), BorderLayout.CENTER)
+        banner.add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0)).apply {
+            isOpaque = false
+            add(com.intellij.ui.components.ActionLink("What's new") { Guide.open(project); close() })
+            add(com.intellij.ui.InplaceButton("Close", AllIcons.Actions.Close) { close() })
+        }, BorderLayout.EAST)
+        return banner
     }
 
     private fun card(p: Proposal): JPanel {

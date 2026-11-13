@@ -60,6 +60,13 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.0.1</h3>
+            <ul>
+              <li>Setup help in the empty <i>Commands</i> tab: link to the MCP server settings and a ready-made CLAUDE.md snippet.</li>
+              <li>Built-in guide (<b>?</b> in the tool window header): setup, a CLAUDE.md prompt per feature and what's new.</li>
+              <li>A short notice after updates that bring new features.</li>
+              <li>The plugin unloads more cleanly on update.</li>
+            </ul>
             <h3>1.0.0</h3>
             <ul>
               <li>First release. Claude Code proposes commands you should run yourself (deploys, logins, releases); run, edit or

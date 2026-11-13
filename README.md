@@ -52,13 +52,13 @@ Then:
 1. Enable the IDE's MCP server: *Settings | Tools | MCP Server*.
 2. Connect Claude Code to it (same settings page, *Auto-Configure* for Claude Code), or reconnect with `/mcp`
    if it was connected before.
-3. Tell Claude when to use it, e.g. in your `CLAUDE.md`:
+3. Tell Claude when to use it: **Copy CLAUDE.md Snippet** in the empty Commands tab copies a block for all tools into
+   the clipboard; paste it into your `CLAUDE.md`.
 
-   ```
-   Commands I should run myself (deploys, logins, releases, uploads): propose them with
-   handoff_propose_command and wait for the result with handoff_wait_for_result
-   instead of writing them into the chat.
-   ```
+The built-in guide (**?** in the tool window header, source: `src/main/resources/guide/guide.md`) holds the setup, one
+prompt per feature and *What's new*. After an update the Commands tab shows the first line under the new version's
+heading once. New features: add a section with its prompt, extend the snippet between the `snippet` markers and add a
+version heading under *What's new*.
 
 ### Plan limits (optional)
 

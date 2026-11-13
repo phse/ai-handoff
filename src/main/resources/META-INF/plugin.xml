@@ -33,6 +33,8 @@
 <ul>
   <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
   <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
+  <li>Tell Claude when to use them: the empty <i>Commands</i> tab copies a ready-made snippet for your <code>CLAUDE.md</code>.</li>
+  <li>The built-in guide (<b>?</b> in the tool window header) lists the setup and a prompt per feature.</li>
 </ul>
 
 <p>Works with Claude Code and other MCP clients. Not affiliated with Anthropic.</p>

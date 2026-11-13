@@ -14,6 +14,7 @@ class UnloadCleanup : DynamicPluginListener {
     override fun beforePluginUnload(pluginDescriptor: IdeaPluginDescriptor, isUpdate: Boolean) {
         if (pluginDescriptor.pluginId.idString != "app.heckit.ide.aihandoff") return
         for (project in ProjectManager.getInstance().openProjects) {
+            Guide.closeAll(project)
             ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.contentManager?.removeAllContents(true)
         }
     }
