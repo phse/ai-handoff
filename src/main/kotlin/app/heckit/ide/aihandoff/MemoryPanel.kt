@@ -96,6 +96,9 @@ class MemoryPanel(private val project: Project) : JPanel(BorderLayout()), Dispos
         rebuild()
     }
 
+    /** Knoten aufklappen (Schlüssel `f:<Pfad>` bzw. `g:…`), z. B. für den Screenshot-Helfer. */
+    fun expand(key: String) { expandedKeys += key; rebuild() }
+
     fun refresh() {
         // Dateien außerhalb des Projekts kennt das VFS oft nicht - einmal einlesen, damit Änderungen künftig gemeldet werden.
         listOfNotNull(File(claudeDir, "CLAUDE.md"), memoryDir).forEach { LocalFileSystem.getInstance().refreshAndFindFileByIoFile(it) }

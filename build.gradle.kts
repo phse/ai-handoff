@@ -20,6 +20,15 @@ kotlin {
     compilerOptions { jvmDefault.set(org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode.NO_COMPATIBILITY) }
 }
 
+// ./gradlew runIde -Pscreenshots=<ordner> baut den Screenshot-Helfer mit ein (nie für Releases verwenden).
+val screenshotDir = providers.gradleProperty("screenshots").orNull
+
+sourceSets {
+    main {
+        if (screenshotDir != null) kotlin.srcDir("src/screenshot/kotlin")
+    }
+}
+
 repositories {
     mavenCentral()
     intellijPlatform {
@@ -93,6 +102,13 @@ tasks.composedJar {
     archiveVersion.set("")
 }
 
+// Für Screenshots wird das Demo-Projekt an einen neutralen Ort kopiert, damit kein lokaler Benutzerpfad im Bild erscheint.
+val screenshotProjectDir = "/Users/Shared/handoff-demo"
+val prepareScreenshotProject = tasks.register<Sync>("prepareScreenshotProject") {
+    from("marketplace/demo-project")
+    into(screenshotProjectDir)
+}
+
 tasks.runIde {
     jvmArgs("-Didea.trust.all.projects=true")
     // Eigener fester MCP-Port für die Sandbox (den Server selbst einmal in den Sandbox-Settings einschalten), damit Claude Code
@@ -111,5 +127,16 @@ tasks.runIde {
             })
         }
     }
-    providers.gradleProperty("openProject").orNull?.let { args(it) }
+    if (screenshotDir != null) {
+        dependsOn(prepareScreenshotProject)
+        args(screenshotProjectDir)
+        jvmArgs("-Dhandoff.screenshots=${file(screenshotDir).absolutePath}")
+    } else {
+        providers.gradleProperty("openProject").orNull?.let { args(it) }
+    }
+}
+
+// Ohne -Pscreenshots bleibt aus dem Build-Cache sonst ein leeres screenshot/-Verzeichnis in den Jars.
+tasks.withType<Zip>().configureEach {
+    includeEmptyDirs = false
 }

@@ -4,6 +4,8 @@
 
 Plugin ID `app.heckit.ide.aihandoff` · Vendor heck\it ([heckit.app](https://heckit.app)) · Source: https://github.com/phse/ai-handoff · Support: [GitHub Sponsors](https://github.com/sponsors/phse) or [Ko-fi](https://ko-fi.com/phse_de) · Feedback and feature requests: [plugin-ai-handoff@heckit.app](mailto:plugin-ai-handoff@heckit.app)
 
+![Handoff tool window with a proposed command and images to choose from](marketplace/screenshots/01-commands.png)
+
 A plugin for JetBrains IDEs (PhpStorm, IntelliJ IDEA, … 2026.1 and later): the place where Claude Code hands work
 over to you, and you hand the result back.
 
@@ -121,6 +123,17 @@ magick $T/L.png $T/D.png +append marketplace/plugin-icon.png
 3. `./gradlew publishPlugin` with a token from https://plugins.jetbrains.com/author/me/tokens, either as
    `PUBLISH_TOKEN=…` or globally in `~/.gradle/gradle.properties` as `jetbrainsMarketplaceToken=…`.
 4. Tag the commit (`git tag v<version>`) and push.
+
+## Regenerating the screenshots
+
+```
+./gradlew runIde -Pscreenshots=marketplace/screenshots
+```
+
+Copies `marketplace/demo-project` to `/Users/Shared/handoff-demo` (no personal path in the images), writes demo memory and
+session logs for it under `~/.claude/projects/-Users-Shared-handoff-demo/` and paints the IDE frame into PNGs (no screen
+recording permission needed). The helper in `src/screenshot` is only compiled with `-Pscreenshots`; never publish such a build.
+The Marketplace takes screenshots only by hand (*Edit Plugin | Media*).
 
 ## How it works
 

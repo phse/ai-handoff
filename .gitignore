@@ -13,7 +13,7 @@ marketplace/icon-proposals/
 
 # Zukunftspläne und Persönliches bleiben lokal
 ROADMAP.md
-CLAUDE.md
+/CLAUDE.md
 
 # Lokaler Zustand der cf-CLI
 .cloudflare/

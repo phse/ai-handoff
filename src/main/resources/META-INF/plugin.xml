@@ -46,6 +46,7 @@
     <depends optional="true" config-file="handoff-vcs.xml">com.intellij.platform.vcs</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="app.heckit.ide.aihandoff.ScreenshotTrigger"/>
         <toolWindow id="Handoff" anchor="right" canCloseContents="false"
                     factoryClass="app.heckit.ide.aihandoff.HandoffToolWindowFactory"/>
         <mcpServer.mcpToolset implementation="app.heckit.ide.aihandoff.HandoffToolset"/>
