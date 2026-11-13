@@ -51,4 +51,7 @@
         <mcpServer.mcpToolset implementation="app.heckit.ide.aihandoff.HandoffToolset"/>
         <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
     </extensions>
+    <applicationListeners>
+        <listener class="app.heckit.ide.aihandoff.UnloadCleanup" topic="com.intellij.ide.plugins.DynamicPluginListener"/>
+    </applicationListeners>
 </idea-plugin>
