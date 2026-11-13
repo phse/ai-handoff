@@ -19,8 +19,16 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 - **One changelist per task**: Claude can open the changelist "Claude: <task>" before it edits files. Everything
   changed until the task ends lands there (new files are added to Git), so you review and commit the task on its own.
 - **Images to review or choose from**: Claude shows one image (approve or dismiss) or several variants (pick one),
-  with an optional note. Hover a thumbnail: the eye opens it full size, the pencil lets you drag frames on it and add a
-  note per frame; Claude gets the frames in pixels of the original image.
+  with an optional note. Hover a thumbnail to open it in the viewer or in an editor tab.
+- **Viewer with marks**: page with ← →, zoom with + / − / 1 (actual size) / 0 (fit). The pen tool draws a frame; write
+  a note right at the frame, move it by its label, resize it at the corners. Claude gets the frames in pixels of the
+  original image.
+- **Memory tab**: what Claude Code loads into every session – global and project `CLAUDE.md`, `@`-imports and the
+  project's memory – as a tree with token estimates per file and per section. Warns about memories missing from
+  `MEMORY.md`, index entries without a file and oversized files; lists files only referenced by path ("on demand") and
+  similar paragraphs across files.
+- **Usage tab**: tokens per day and per session for this project (today, 7 or 30 days), read from Claude Code's
+  session logs. Optionally the plan limits (5-hour and weekly) with their reset times, see below.
 - Nothing runs without your click.
 
 ## Tools
@@ -35,8 +43,7 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 
 ## Installation
 
-Not on the Marketplace yet. Build the ZIP (below) and install it via *Settings | Plugins | ⚙ | Install Plugin from
-Disk…*.
+From the JetBrains Marketplace: *Settings | Plugins | Marketplace*, search for "Handoff for Claude Code".
 
 Then:
 
@@ -50,6 +57,14 @@ Then:
    handoff_propose_command and wait for the result with handoff_wait_for_result
    instead of writing them into the chat.
    ```
+
+### Plan limits (optional)
+
+Claude Code passes the 5-hour and weekly plan limits only to a status line script. **Show Plan Limits…** in the Usage
+tab creates `~/.claude/handoff/statusline.sh` and sets it as the status line in `~/.claude/settings.json` (backup:
+`settings.json.bak-handoff`). The script stores Claude Code's status line data in `~/.claude/handoff/statusline.json`
+for the IDE and prints `5h 23% · week 41%`; an existing status line command keeps working, the script calls it. Only Pro
+and Max plans report limits.
 
 ## Build and run
 
@@ -110,9 +125,14 @@ magick $T/L.png $T/D.png +append marketplace/plugin-icon.png
 ## How it works
 
 The plugin registers an `mcpServer.mcpToolset` with the IDE's bundled MCP server (plugin `com.intellij.mcpServer`), so
-any connected MCP client sees the two tools. Proposals live in a project service; `handoff_propose_command` returns
+any connected MCP client sees the tools. Proposals live in a project service; `handoff_propose_command` returns
 right away, `handoff_wait_for_result` suspends on the proposal until it is run or dismissed (or the timeout passes), so
 a long deploy never blocks a single MCP call. Commands run as a `KillableColoredProcessHandler` in the Run tool window.
+
+The Memory tab reads `~/.claude/CLAUDE.md`, every `CLAUDE.md`, `.claude/CLAUDE.md` and `CLAUDE.local.md` from the home
+folder down to the project, and `~/.claude/projects/<project path with - for every non-alphanumeric character>/memory/`.
+Tokens are estimated as characters / 4. The Usage tab reads the `.jsonl` session logs in that project folder; each
+response is counted once (by message id).
 
 ## License
 

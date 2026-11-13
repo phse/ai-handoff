@@ -21,7 +21,11 @@
   <li><b>Result back to Claude</b>: exit code and the last lines of output, no copy and paste.</li>
   <li><b>One changelist per task</b>: files Claude changes for a task land in their own changelist "Claude: &lt;task&gt;",
       ready to review and commit on their own.</li>
-  <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one; mark areas with a frame and a note for Claude.</li>
+  <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging
+      lets you mark areas with a frame and a note for Claude, right on the image.</li>
+  <li><b>Memory</b>: everything Claude Code loads into each session (CLAUDE.md files, imports, project memory) as a tree with token
+      estimates per file and section, warnings for memories missing from the index, on-demand files and duplicated paragraphs.</li>
+  <li><b>Usage</b>: tokens per day and session for the project, and optionally your 5-hour and weekly plan limits.</li>
   <li>Nothing runs without your click.</li>
 </ul>
 

@@ -51,11 +51,14 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
-            <h3>0.1.0</h3>
+            <h3>1.0.0</h3>
             <ul>
-              <li>First release: Claude Code proposes commands you should run yourself (deploys, logins, releases). They show up in the
-                  <i>Handoff</i> tool window; run, edit or dismiss them with one click. Exit code and output go straight back to
-                  Claude.</li>
+              <li>First release. Claude Code proposes commands you should run yourself (deploys, logins, releases); run, edit or
+                  dismiss them in the <i>Handoff</i> tool window, exit code and output go straight back to Claude.</li>
+              <li>One changelist per Claude task.</li>
+              <li>Images to review or choose from, with a viewer to mark areas and add notes for Claude.</li>
+              <li><i>Memory</i> tab: CLAUDE.md files, imports and project memory with token estimates and warnings.</li>
+              <li><i>Usage</i> tab: tokens per day and session, optionally the 5-hour and weekly plan limits.</li>
             </ul>
         """.trimIndent()
     }
