@@ -124,6 +124,15 @@ object SessionEditors {
         open(project, tab, null)
     }
 
+    /**
+     * Neue Karte: Handoff-Fenster öffnen - außer ein Session-Reiter ist vorn, der zeigt die Karte selbst am Ende des
+     * Gesprächs; das aufspringende Fenster würde dort nur stören.
+     */
+    fun revealCards(project: Project) {
+        if (FileEditorManager.getInstance(project).selectedEditor?.file is SessionFile) return
+        com.intellij.openapi.wm.ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.show()
+    }
+
     fun closeAll(project: Project) {
         val manager = FileEditorManager.getInstance(project)
         manager.openFiles.filterIsInstance<SessionFile>().forEach { manager.closeFile(it) }

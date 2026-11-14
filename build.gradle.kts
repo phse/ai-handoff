@@ -69,6 +69,10 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.3.1</h3>
+            <ul>
+              <li>New cards no longer pop up the Handoff tool window while a session tab is in front; the card shows in the tab.</li>
+            </ul>
             <h3>1.3.0</h3>
             <ul>
               <li><b>Claude sessions in editor tabs</b>: <i>New Claude Session</i> (also in ⌘N / File | New) starts Claude Code in a terminal tab in the

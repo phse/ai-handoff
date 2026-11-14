@@ -215,7 +215,8 @@ in a terminal tab in the background and opens the session in an editor tab:
   draw frames with a note each, and the prompt gets them as pixel areas with the notes. Opening it again shows the frames
   from the prompt, and saving replaces them.
 - Waiting Handoff cards (commands to run, questions, reviews, images) show at the end of the conversation too, so you
-  can answer there without switching to the tool window.
+  can answer there without switching to the tool window. While a session tab is in front, new cards do not pop up
+  the tool window.
 - Session tabs open again after an IDE restart. If the session no longer runs in the IDE terminal, **Resume** (next to
   the prompt field, or **Resume in Terminal** at the top) continues it (`claude --resume`) in a new terminal tab.
 - While Claude works: **Interrupt (Esc)**. When Claude asks for a permission: **Yes**, **Yes, Don't Ask Again** and
