@@ -127,6 +127,16 @@ class HandoffToolset : McpToolset {
                 p.note?.let { append("\nNote: $it") }
                 p.lineNotes?.let { append("\nLine notes (path:line, the note, then the line it is attached to):\n").append(it) }
             }
+            Proposal.State.FINISHED if p.isAsk -> buildString {
+                append("answered by the user.")
+                p.questions.forEachIndexed { qi, q ->
+                    append("\n\nQuestion ${qi + 1}: ${q.question.lineSequence().first().take(120)}")
+                    val chosen = q.picked.sorted()
+                    if (chosen.isEmpty()) append("\nNo option picked.")
+                    else chosen.forEach { append("\nChosen: ${it + 1}. ${q.options[it].label}") }
+                    q.own.takeIf { it.isNotBlank() }?.let { append("\nOwn answer: $it") }
+                }
+            }
             Proposal.State.FINISHED if p.images.isNotEmpty() -> buildString {
                 val i = p.chosen ?: 0
                 append(if (p.images.size == 1) "approved by the user." else "the user chose image ${i + 1} of ${p.images.size}: ${p.images[i]}.")
@@ -198,6 +208,32 @@ class HandoffToolset : McpToolset {
             ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.show()
         }, project.disposed)
         return "Shown as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the user's answer."
+    }
+
+    @McpTool
+    @McpDescription(
+        """
+        |Asks the user one or more questions with options to pick from, as a card in the IDE's Handoff tool window - per
+        |question one answer or several (multiSelect), plus a free-text field for an own answer. Several questions are
+        |shown one after another (Back/Next). Prefer it over asking in the terminal when the questions or options are long.
+        |Returns an id; call handoff_wait_for_result with it to get the chosen options and the user's own text per question.
+        """
+    )
+    suspend fun handoff_ask(
+        @McpDescription("The questions, shown one after another (Back/Next, Submit on the last). Usually one; several when they belong together.")
+        questions: List<AskQuestion>,
+        @McpDescription("Optional heading for the card, one short sentence (e.g. \"Which findings should I save?\"). Empty = the first question.")
+        title: String = "",
+    ): String {
+        val project = currentCoroutineContext().project
+        val list = questions.map { q -> q.copy(question = q.question.trim(), options = q.options.filter { it.label.isNotBlank() }) }
+            .filter { it.options.isNotEmpty() }
+        if (list.isEmpty()) return "No questions with options given."
+        val p = HandoffService.getInstance(project).proposeAsk(title.trim(), list)
+        ApplicationManager.getApplication().invokeLater({
+            ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.show()
+        }, project.disposed)
+        return "Asked as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the user's answers."
     }
 
     @McpTool

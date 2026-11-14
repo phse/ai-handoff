@@ -25,7 +25,8 @@
       (hover a line, click the <b>+</b>) and approve or send the notes back, each with path, line and code.</li>
   <li><b>Command sequences</b>: several commands as one card, run all or step by step, stops at the first failure.</li>
   <li><b>Claude is waiting</b> (optional): a card and a notification when a Claude Code session in the project is done or
-      needs your input.</li>
+      needs your input. Read the full message in an editor tab and type your next prompt right into the card.</li>
+  <li><b>Questions with options</b>: Claude asks as a card, one answer or several, plus your own answer.</li>
   <li><b>Notifications</b> when something is waiting while the IDE is in the background.</li>
   <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging
       lets you mark areas with a frame and a note for Claude, right on the image.</li>
@@ -38,9 +39,9 @@
 <h3>Setup</h3>
 <ul>
   <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
-  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_propose_sequence</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_request_review</code>, <code>handoff_get_notes</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
+  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_propose_sequence</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_ask</code>, <code>handoff_request_review</code>, <code>handoff_get_notes</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
   <li>Tell Claude when to use them: the empty <i>Commands</i> tab copies a ready-made snippet for your <code>CLAUDE.md</code>.</li>
-  <li>The built-in guide (<b>?</b> in the tool window header) lists the setup and a prompt per feature.</li>
+  <li>The built-in guide (<b>Guide</b> in the tool window's ⋮ menu) lists the setup and a prompt per feature.</li>
 </ul>
 
 <p>Works with Claude Code and other MCP clients. Not affiliated with Anthropic.</p>
@@ -59,6 +60,7 @@
                     factoryClass="app.heckit.ide.aihandoff.HandoffToolWindowFactory"/>
         <mcpServer.mcpToolset implementation="app.heckit.ide.aihandoff.HandoffToolset"/>
         <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
+        <fileEditorProvider implementation="app.heckit.ide.aihandoff.MarkdownViewerProvider"/>
         <editorFactoryListener implementation="app.heckit.ide.aihandoff.NoteGutterInstaller"/>
         <editor.linePainter implementation="app.heckit.ide.aihandoff.NoteLinePainter"/>
     </extensions>

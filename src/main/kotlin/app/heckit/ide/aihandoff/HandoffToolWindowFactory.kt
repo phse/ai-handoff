@@ -110,7 +110,26 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                 if (event.operation == com.intellij.ui.content.ContentManagerEvent.ContentOperation.add && event.content.component === usage) usage.refresh()
             }
         })
+        fun layoutToggle(text: String, get: () -> Boolean, set: (Boolean) -> Unit) =
+            object : com.intellij.openapi.actionSystem.ToggleAction(text), DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+                override fun isSelected(e: AnActionEvent) = get()
+                override fun setSelected(e: AnActionEvent, state: Boolean) { set(state); HandoffService.getInstance(project).fireChanged() }
+            }
         toolWindow.setAdditionalGearActions(com.intellij.openapi.actionSystem.DefaultActionGroup(
+            object : AnAction("Guide", "Setup, a CLAUDE.md prompt per feature and what's new", AllIcons.Actions.Help), DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = Guide.open(project)
+            },
+            object : AnAction("Handoff Tools…", "Which tools Claude uses; switch the CLAUDE.md instruction or the permission per tool", AllIcons.General.Settings), DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = usage.manageTools()
+            },
+            object : AnAction("Update CLAUDE.md Instructions…", "Lets Claude add the Handoff instructions your CLAUDE.md does not have yet", AllIcons.Ide.External_link_arrow), DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = FeaturesDialog.showMissing(project)
+            },
+            com.intellij.openapi.actionSystem.Separator.create(),
             object : com.intellij.openapi.actionSystem.ToggleAction("Show When Claude Is Waiting", "Adds hooks to Claude Code that tell the IDE when a session is done or needs your input", null), DumbAware {
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
                 override fun isSelected(e: AnActionEvent) = WaitingHook.isInstalled()
@@ -127,6 +146,9 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                     }
                 }
             },
+            layoutToggle("Pin Claude Messages to the Bottom", { Layout.pinClaudeMessages }, { Layout.pinClaudeMessages = it }),
+            layoutToggle("Newest Cards on Top", { Layout.newestOnTop }, { Layout.newestOnTop = it }),
+            com.intellij.openapi.actionSystem.Separator.create(),
         ))
         fun selected() = toolWindow.contentManager.selectedContent?.component
         fun isMemory() = selected() === memory || selected() === usage
@@ -141,12 +163,21 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
                 override fun actionPerformed(e: AnActionEvent) = if (selected() === usage) usage.refresh() else memory.refresh()
             },
-            object : AnAction("Guide", "Setup, a CLAUDE.md prompt per feature and what's new", AllIcons.Actions.Help), DumbAware {
-                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
-                override fun actionPerformed(e: AnActionEvent) = Guide.open(project)
-            },
         ))
     }
+}
+
+/** Anordnung im Commands-Reiter (für alle Projekte). */
+object Layout {
+    private const val NEWEST_TOP = "app.heckit.ide.aihandoff.newestOnTop"
+    private const val PIN = "app.heckit.ide.aihandoff.pinClaudeMessages"
+    var newestOnTop: Boolean
+        get() = com.intellij.ide.util.PropertiesComponent.getInstance().getBoolean(NEWEST_TOP, false)
+        set(v) = com.intellij.ide.util.PropertiesComponent.getInstance().setValue(NEWEST_TOP, v, false)
+    /** „Claude is done/waiting“-Karten fest am unteren Rand statt in der Liste. */
+    var pinClaudeMessages: Boolean
+        get() = com.intellij.ide.util.PropertiesComponent.getInstance().getBoolean(PIN, true)
+        set(v) = com.intellij.ide.util.PropertiesComponent.getInstance().setValue(PIN, v, true)
 }
 
 private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
@@ -160,9 +191,18 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         override fun getScrollableTracksViewportHeight() = false
     }.apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(8) }
     private val time = SimpleDateFormat("HH:mm")
+    private var lastNewest = 0L
+
+    /** Feste Ablage am unteren Rand für Claudes Nachrichten (siehe [Layout.pinClaudeMessages]). */
+    private val pinned = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        border = JBUI.Borders.compound(JBUI.Borders.customLineTop(JBColor.border()), JBUI.Borders.empty(8, 8, 0, 8))
+    }
+    private val scroll = JBScrollPane(list).apply { border = JBUI.Borders.empty() }
 
     init {
-        add(JBScrollPane(list).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
+        add(scroll, BorderLayout.CENTER)
+        add(pinned, BorderLayout.SOUTH)
         // Nicht in Screenshot-Läufen: Dort gilt die Sandbox als "gerade aktualisiert".
         if (System.getProperty("handoff.screenshots") == null) Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
         service.addListener({ rebuild() }, this)
@@ -173,30 +213,65 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         list.removeAll()
         val notes = NotesService.getInstance(project).all()
         val waiting = project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty()
-        if (service.proposals.isEmpty() && notes.isEmpty() && waiting.isEmpty()) list.add(emptyState())
-        waiting.forEach {
-            list.add(waitingCard(it))
-            list.add(Box.createVerticalStrut(JBUI.scale(8)))
-        }
+        val pin = Layout.pinClaudeMessages
+        val top = Layout.newestOnTop
+        if (service.proposals.isEmpty() && notes.isEmpty() && (waiting.isEmpty() || pin)) list.add(emptyState())
+        // Chronologisch, Richtung nach Einstellung (Standard: älteste oben, neueste unten wie in einem Chat).
+        val items: List<Pair<Long, () -> JPanel>> =
+            // Die Liste ist neueste zuerst; umgedreht bleibt die Reihenfolge bei gleicher Millisekunde richtig (stabile Sortierung).
+            service.proposals.reversed().map { p -> p.createdAt to { card(p) } } + if (pin) emptyList() else waiting.map { w -> w.at to { waitingCard(w) } }
+        val sorted = items.sortedBy { it.first }.let { if (top) it.reversed() else it }
         // Notizen ohne wartende Prüfung: eigene Karte, bis Claude sie abholt. Sonst stehen sie in der Prüfkarte.
-        if (notes.isNotEmpty() && service.proposals.none { it.review && it.isPending }) {
-            list.add(notesCard(notes))
+        val notesCard = if (notes.isNotEmpty() && service.proposals.none { it.review && it.isPending }) notesCard(notes) else null
+        if (top && notesCard != null) { list.add(notesCard); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
+        sorted.forEach { (_, make) ->
+            list.add(make())
             list.add(Box.createVerticalStrut(JBUI.scale(8)))
         }
-        service.proposals.forEach {
-            list.add(card(it))
-            list.add(Box.createVerticalStrut(JBUI.scale(8)))
-        }
+        if (!top && notesCard != null) { list.add(notesCard); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
         list.add(Box.createVerticalGlue())
         list.revalidate()
         list.repaint()
+
+        pinned.removeAll()
+        if (pin) waiting.sortedBy { it.at }.let { if (top) it.reversed() else it }.forEach {
+            pinned.add(waitingCard(it)); pinned.add(Box.createVerticalStrut(JBUI.scale(8)))
+        }
+        pinned.isVisible = pinned.componentCount > 0
+        pinned.revalidate(); pinned.repaint()
+
+        // Neue Karte: dorthin scrollen, wo die neuesten stehen.
+        val newest = items.maxOfOrNull { it.first } ?: 0L
+        if (newest > lastNewest) SwingUtilities.invokeLater {
+            list.scrollRectToVisible(if (top) Rectangle(0, 0, 1, 1) else Rectangle(0, list.height - 1, 1, 1))
+        }
+        lastNewest = newest
     }
 
     private fun link(text: String, action: () -> Unit) =
         com.intellij.ui.components.ActionLink(text) { action() }.apply { alignmentX = LEFT_ALIGNMENT }
 
     /** Einrichtung, solange keine Karte da ist - so sieht man sie gleich nach der Installation. */
-    private fun emptyState() = JPanel().apply {
+    private fun showFeatures() = FeaturesDialog.showMissing(project)
+
+    /**
+     * Leerer Reiter. Ist Handoff schon eingerichtet (die CLAUDE.md nennt Handoff-Werkzeuge), nur eine Zeile - die
+     * Einrichtung braucht man dann nicht mehr dauernd zu sehen; fehlende neue Anweisungen als Link.
+     */
+    private fun emptyState(): JPanel {
+        if (Features.mentioned(project).isEmpty()) return setupState()
+        val missing = Features.missing(project)
+        return JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false; alignmentX = LEFT_ALIGNMENT
+            add(grey("Nothing waiting.").apply { font = UIUtil.getLabelFont() })
+            if (missing.isNotEmpty()) {
+                add(Box.createVerticalStrut(JBUI.scale(6)))
+                add(link(if (missing.size == 1) "1 new instruction for your CLAUDE.md…" else "${missing.size} new instructions for your CLAUDE.md…") { showFeatures() })
+            }
+        }
+    }
+
+    private fun setupState() = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false; alignmentX = LEFT_ALIGNMENT
         fun text(html: String) = JBLabel("<html>$html</html>").apply { alignmentX = LEFT_ALIGNMENT }
         add(text("<b>No commands yet.</b>"))
@@ -211,8 +286,9 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         add(Box.createVerticalStrut(JBUI.scale(4)))
         add(text("2. Connect Claude Code: <i>Auto-Configure</i> on the same page, or <code>/mcp</code> in Claude Code."))
         add(Box.createVerticalStrut(JBUI.scale(4)))
-        add(text("3. Tell Claude when to use Handoff: add the snippet to your CLAUDE.md."))
-        add(link("Copy CLAUDE.md Snippet") {
+        add(text("3. Tell Claude when to use Handoff: let Claude add the instructions to your CLAUDE.md."))
+        add(link("Add Instructions to CLAUDE.md…") { showFeatures() }.apply { border = JBUI.Borders.emptyLeft(14) })
+        add(link("Or copy the snippet and paste it yourself") {
             Guide.copySnippet()
             com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(
                 "Copied. Paste it into ~/.claude/CLAUDE.md or the project's CLAUDE.md.", com.intellij.openapi.ui.MessageType.INFO, null
@@ -232,7 +308,9 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         banner.add(JBLabel("<html><b>New in $version:</b> ${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(news.replace("**", "").replace("`", ""))}</html>"), BorderLayout.CENTER)
         banner.add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0)).apply {
             isOpaque = false
-            add(com.intellij.ui.components.ActionLink("What's new") { Guide.open(project); close() })
+            if (Features.missing(project).isNotEmpty()) add(com.intellij.ui.components.ActionLink("Update CLAUDE.md…") { showFeatures() })
+            add(com.intellij.ui.components.ActionLink("What's new") { Guide.openNews(project, version); close() })
+            add(com.intellij.ui.components.ActionLink("Guide") { Guide.open(project); close() })
             add(com.intellij.ui.InplaceButton("Close", AllIcons.Actions.Close) { close() })
         }, BorderLayout.EAST)
         return banner
@@ -375,25 +453,153 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         return card
     }
 
+    /** Markdown als HTML, umbrechend in der schmalen Liste. */
+    private fun markdown(md: String) = javax.swing.JEditorPane().apply {
+        editorKit = com.intellij.util.ui.HTMLEditorKitBuilder().build()
+        text = "<html><body>${Md.html(md)}</body></html>"
+        isEditable = false; isOpaque = false; border = null; alignmentX = LEFT_ALIGNMENT
+        putClientProperty(javax.swing.JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        font = UIUtil.getLabelFont()
+    }
+
     /** Eine Claude-Session wartet: fertig (Stop) oder braucht eine Eingabe (Notification). */
     private fun waitingCard(s: WaitingSession): JPanel {
+        val sessions = WaitingSessions.getInstance(project)
         val accent = if (s.finished) JBColor(0x2A7AA0, 0x5AA8D0) else JBColor(0xB04079, 0xC86A9A)
+        val title = if (s.finished) "Claude is done" else "Claude is waiting for you"
         val card = cardPanel(accent)
         card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(if (s.finished) "Claude is done" else "Claude is waiting for you").apply { foreground = accent }, BorderLayout.WEST)
+            add(JBLabel(title).apply { foreground = accent }, BorderLayout.WEST)
             add(JBLabel(time.format(Date(s.at))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
         card.add(JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
-            val text = s.text.lines().filter { it.isNotBlank() }.take(4).joinToString("\n").let { if (it.length > 320) it.take(320) + "…" else it }
-            if (text.isNotEmpty()) add(wrapped(text))
+            val (preview, cut) = Md.preview(s.text)
+            if (preview.isNotEmpty()) add(markdown(preview))
+            // Die ganze Nachricht in einem Editor-Reiter: breiter, von oben nach unten lesbar, Markdown gerendert.
+            if (cut) add(link("Open Full Message") { Md.openMessage(project, time.format(Date(s.at)), s.text) })
             val base = project.basePath.orEmpty().trimEnd('/')
             if (s.cwd != base) add(grey(s.cwd.removePrefix("$base/")))
         }, BorderLayout.CENTER)
-        card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+        val dismiss = JButton("Dismiss").apply { addActionListener { sessions.dismiss(s) } }
+        if (s.id in sessions.sent) {
+            card.add(JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(grey("Sent to Claude…"), BorderLayout.WEST)
+            }, BorderLayout.SOUTH)
+        } else if (s.listening) {
+            // Weiterer Prompt: Enter schickt ab, Umschalt+Enter macht eine neue Zeile.
+            val input = JBTextArea(sessions.drafts[s.id].orEmpty(), 2, 0).apply {
+                lineWrap = true; wrapStyleWord = true; font = UIUtil.getLabelFont()
+                emptyText.text = "Next prompt for Claude"
+                border = JBUI.Borders.empty(4, 6)
+                document.addDocumentListener(object : DocumentAdapter() {
+                    override fun textChanged(e: DocumentEvent) { sessions.drafts[s.id] = text }
+                })
+            }
+            val send = JButton("Send").apply {
+                putClientProperty("JButton.buttonType", "default")
+                addActionListener { sessions.reply(s, input.text) }
+            }
+            input.inputMap.put(javax.swing.KeyStroke.getKeyStroke("ENTER"), "handoff.send")
+            input.inputMap.put(javax.swing.KeyStroke.getKeyStroke("shift ENTER"), "insert-break")
+            input.actionMap.put("handoff.send", object : javax.swing.AbstractAction() {
+                override fun actionPerformed(e: java.awt.event.ActionEvent) { sessions.reply(s, input.text) }
+            })
+            card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+                isOpaque = false
+                add(JBScrollPane(input).apply { border = JBUI.Borders.customLine(JBColor.border()) }, BorderLayout.NORTH)
+                add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                    isOpaque = false
+                    add(send); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
+                }, BorderLayout.SOUTH)
+            }, BorderLayout.SOUTH)
+        } else {
+            card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply { isOpaque = false; add(dismiss) }, BorderLayout.SOUTH)
+        }
+        return card
+    }
+
+    /** Fragen mit Auswahl (handoff_ask): je Frage eine oder mehrere Antworten und eigener Text; mehrere Fragen mit Back/Next. */
+    private fun askCard(p: Proposal): JPanel {
+        val pending = p.isPending
+        val n = p.questions.size
+        val accent = when (p.state) {
+            Proposal.State.PENDING -> JBColor(0x2A7AA0, 0x5AA8D0)
+            Proposal.State.FINISHED -> JBColor(0x5A9E6F, 0x5A9E6F)
+            else -> JBColor.border()
+        }
+        val card = cardPanel(accent)
+        val status = when (p.state) {
+            Proposal.State.PENDING -> if (n == 1) "Question" else "Question ${p.page + 1} of $n"
+            Proposal.State.FINISHED -> "Answered"
+            else -> "Dismissed" + (p.note?.let { ": $it" } ?: "")
+        }
+        card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JButton("Dismiss").apply { addActionListener { WaitingSessions.getInstance(project).dismiss(s) } })
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+
+        val body = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false }
+        if (p.reason.isNotBlank()) { body.add(markdown(p.reason)); body.add(Box.createVerticalStrut(JBUI.scale(6))) }
+        if (!pending) {
+            // Erledigt: kurz je Frage, was gewählt wurde.
+            p.questions.forEach { q ->
+                val answer = (q.picked.sorted().map { q.options[it].label } + listOfNotNull(q.own.takeIf { it.isNotBlank() })).joinToString(", ")
+                body.add(wrapped(Md.plain(q.question.lineSequence().first()) + (if (answer.isNotEmpty()) " → $answer" else "")).apply {
+                    foreground = UIUtil.getContextHelpForeground()
+                })
+            }
+            card.add(body, BorderLayout.CENTER)
+            return card
+        }
+
+        val q = p.questions[p.page.coerceIn(0, n - 1)]
+        val last = p.page >= n - 1
+        val own = JBTextField(q.own).apply { emptyText.text = "Own answer (optional)" }
+        val next = JButton(if (last) "Submit" else "Next").apply { putClientProperty("JButton.buttonType", "default") }
+        fun updateNext() { next.isEnabled = q.answered }
+        body.add(markdown(q.question + if (q.multiSelect) "\n\n*Pick any.*" else ""))
+        if (q.question.lines().size > 12) body.add(link("Open in Editor") { Md.openMessage(project, "Question " + time.format(Date(p.createdAt)), q.question) })
+        body.add(Box.createVerticalStrut(JBUI.scale(6)))
+        val group = javax.swing.ButtonGroup()
+        q.options.forEachIndexed { i, o ->
+            val box: javax.swing.JToggleButton =
+                if (q.multiSelect) javax.swing.JCheckBox(o.label) else javax.swing.JRadioButton(o.label).also(group::add)
+            box.apply {
+                isOpaque = false; alignmentX = LEFT_ALIGNMENT; isSelected = i in q.picked
+                addActionListener {
+                    if (!q.multiSelect) q.picked.clear()
+                    if (isSelected) q.picked += i else q.picked -= i
+                    updateNext()
+                }
+            }
+            body.add(box)
+            if (o.description.isNotEmpty()) body.add(JBLabel("<html>${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(o.description)}</html>").apply {
+                foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont(); alignmentX = LEFT_ALIGNMENT
+                border = JBUI.Borders.emptyLeft(24)
+            })
+        }
+        card.add(body, BorderLayout.CENTER)
+
+        own.document.addDocumentListener(object : DocumentAdapter() {
+            override fun textChanged(e: DocumentEvent) { q.own = own.text; updateNext() }
+        })
+        fun advance() { if (last) service.answer(p) else { p.page++; service.fireChanged() } }
+        own.addActionListener { if (next.isEnabled) advance() }
+        next.addActionListener { advance() }
+        updateNext()
+        val back = JButton("Back").apply { isVisible = p.page > 0; addActionListener { p.page--; service.fireChanged() } }
+        val dismiss = JButton("Dismiss").apply { addActionListener { service.dismiss(p, own.text) } }
+        card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+            isOpaque = false
+            add(own, BorderLayout.NORTH)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                listOf(back, next, dismiss).filter { it.isVisible }.forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
+            }, BorderLayout.SOUTH)
         }, BorderLayout.SOUTH)
         return card
     }
@@ -492,6 +698,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         if (p.review) return reviewCard(p)
         if (p.steps.isNotEmpty()) return sequenceCard(p)
         if (p.images.isNotEmpty()) return imageCard(p)
+        if (p.isAsk) return askCard(p)
         val accent = when {
             p.state == Proposal.State.FINISHED && p.exitCode == 0 -> JBColor(0x5A9E6F, 0x5A9E6F)
             p.state == Proposal.State.FINISHED -> JBColor(0xC75450, 0xC75450)

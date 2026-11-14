@@ -23,6 +23,31 @@ class Step(@Volatile var command: String) {
     }
 }
 
+/** Antwortmöglichkeit einer Frage (handoff_ask); auch MCP-Parameter. */
+@kotlinx.serialization.Serializable
+data class AskOption(
+    @com.intellij.mcpserver.annotations.McpDescription("Short label, a few words.")
+    val label: String,
+    @com.intellij.mcpserver.annotations.McpDescription("Optional one-line explanation shown under the label.")
+    val description: String = "",
+)
+
+/** Eine Frage von handoff_ask; mehrere Fragen blättert der Nutzer mit Back/Next durch. */
+@kotlinx.serialization.Serializable
+data class AskQuestion(
+    @com.intellij.mcpserver.annotations.McpDescription("The question. Markdown is rendered; it may be long (context, a list of findings).")
+    val question: String,
+    @com.intellij.mcpserver.annotations.McpDescription("Options to pick from (2-10).")
+    val options: List<AskOption>,
+    @com.intellij.mcpserver.annotations.McpDescription("True if the user may pick several options.")
+    val multiSelect: Boolean = false,
+) {
+    /** Nur Oberfläche bzw. Ergebnis: angekreuzte Optionen und eigene Antwort. */
+    @kotlinx.serialization.Transient val picked: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    @kotlinx.serialization.Transient @Volatile var own: String = ""
+    val answered get() = picked.isNotEmpty() || own.isNotBlank()
+}
+
 /** Ein von der KI vorgeschlagener Befehl, den der Nutzer selbst ausführt. */
 class Proposal(
     val id: String,
@@ -39,6 +64,8 @@ class Proposal(
     val changelist: String? = null,
     /** Ablauf aus mehreren Befehlen (dann ist [command] leer): einzeln oder nacheinander ausführbar, Stopp beim ersten Fehler. */
     val steps: List<Step> = emptyList(),
+    /** Fragen mit Auswahl (dann ist [command] leer und [reason] die Überschrift). */
+    val questions: List<AskQuestion> = emptyList(),
 ) {
     enum class State { PENDING, RUNNING, FINISHED, DISMISSED }
 
@@ -50,6 +77,9 @@ class Proposal(
     /** Nur Oberfläche: markiertes Bild und angefangene Notiz, damit sie ein Neuzeichnen der Liste überstehen. */
     @Volatile var selected: Int? = null
     @Volatile var noteDraft: String = ""
+    val isAsk get() = questions.isNotEmpty()
+    /** Nur Oberfläche: gerade gezeigte Frage. */
+    @Volatile var page = 0
     /** Zeilennotizen, die der Nutzer mit der Prüfung zurückgegeben hat (Text für Claude). */
     @Volatile var lineNotes: String? = null
     val isPending get() = state == State.PENDING
@@ -126,6 +156,22 @@ class HandoffService(private val project: Project) {
         Attention.notify(project, if (paths.size == 1) "Claude asks you to review an image" else "Claude asks you to choose an image", question)
         fireChanged()
         return p
+    }
+
+    fun proposeAsk(title: String, questions: List<AskQuestion>): Proposal {
+        val p = Proposal("h${counter.incrementAndGet()}", "", title, "", false, questions = questions)
+        proposals.add(0, p)
+        Attention.notify(project, if (questions.size == 1) "Claude asks you a question" else "Claude asks you ${questions.size} questions",
+            Md.plain(title.ifBlank { questions.first().question }))
+        fireChanged()
+        return p
+    }
+
+    /** Fragen beantworten: Antworten stehen in [AskQuestion.picked] und [AskQuestion.own]. */
+    fun answer(p: Proposal) {
+        p.state = Proposal.State.FINISHED
+        p.done.complete(Unit)
+        fireChanged()
     }
 
     fun proposeReview(summary: String, changelist: String?): Proposal {

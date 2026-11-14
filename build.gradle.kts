@@ -3,6 +3,8 @@ import java.util.Properties
 
 plugins {
     id("org.jetbrains.kotlin.jvm") version "2.4.20"
+    // Parameter von handoff_ask sind Objekte: Der MCP-Server der IDE leitet ihr Schema aus kotlinx.serialization ab.
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.4.20"
     id("org.jetbrains.intellij.platform") version "2.19.0"
 }
 
@@ -62,6 +64,22 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.2.0</h3>
+            <ul>
+              <li><b>Questions with options</b> (<code>handoff_ask</code>): Claude asks one or more questions as a card (Back/Next),
+                  one answer or several per question, each option with a short description, plus a field for your own answer.</li>
+              <li><b>Handoff Tools…</b>: calls per tool, and per tool switches for the CLAUDE.md instruction and the permission
+                  (<code>permissions.deny</code>).</li>
+              <li>Cards in chronological order, newest at the bottom or on top (⋮ menu); Claude's messages pinned to the bottom
+                  of the Commands tab (can be switched off). The guide moved into the ⋮ menu.</li>
+              <li><b>Claude is done</b>: the card shows the start of the message formatted, <i>Open Full Message</i> shows all of it in
+                  an editor tab, and a field sends your next prompt straight to that Claude Code session.</li>
+              <li><b>Update CLAUDE.md…</b>: pick the Handoff instructions your CLAUDE.md is missing and send them to a waiting Claude
+                  Code session, or copy the prompt. The Usage tab shows which Handoff tools Claude calls.</li>
+              <li>Once set up, the empty Commands tab shows one line instead of the setup steps.</li>
+              <li>System notifications show Claude's messages without Markdown characters; clicking one brings the right project
+                  window to the front (2026.2 and later).</li>
+            </ul>
             <h3>1.1.0</h3>
             <ul>
               <li><b>Review with line notes</b>: Claude asks you to review its changes (<code>handoff_request_review</code>). Open the

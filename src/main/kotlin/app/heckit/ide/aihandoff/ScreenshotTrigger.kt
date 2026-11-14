@@ -8,6 +8,7 @@ import com.intellij.openapi.startup.ProjectActivity
 class ScreenshotTrigger : ProjectActivity {
     override suspend fun execute(project: Project) {
         WaitingSessions.getInstance(project).start()
+        Guide.openOnFirstInstall(project)
         val dir = System.getProperty("handoff.screenshots") ?: return
         runCatching {
             Class.forName("app.heckit.ide.aihandoff.screenshot.ScreenshotMaker")

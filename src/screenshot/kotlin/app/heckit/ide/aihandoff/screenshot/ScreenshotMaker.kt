@@ -43,6 +43,9 @@ object ScreenshotMaker {
     private fun run(project: Project, out: File) {
         val base = File(project.basePath ?: error("no base path"))
         writeDemoClaudeData(base)
+        // Ansicht wie nach der Installation (die Sandbox behält, was man dort umgestellt hat).
+        app.heckit.ide.aihandoff.Layout.newestOnTop = false
+        app.heckit.ide.aihandoff.Layout.pinClaudeMessages = true
         val frame = edt { WindowManager.getInstance().getFrame(project) } ?: error("no frame")
         edt {
             frame.extendedState = JFrame.NORMAL
@@ -115,8 +118,11 @@ object ScreenshotMaker {
         val waitingFile = File(app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }, "handoff-demo.json")
         waitingFile.writeText(com.google.gson.JsonObject().apply {
             addProperty("session_id", "handoff-demo"); addProperty("cwd", base.path); addProperty("hook_event_name", "Stop")
-            addProperty("last_assistant_message", "The checkout button now uses the pill style. Tests pass; the release steps are ready for you.")
+            addProperty("last_assistant_message", "The checkout button now uses the **pill style**. Tests pass; the release steps are ready for you.")
         }.toString())
+        // Ein wartender Stop-Hook: Die Karte bekommt das Feld für den nächsten Prompt.
+        val listenFile = File(waitingFile.parentFile, "handoff-demo.listen").apply { writeText("0") }
+        app.heckit.ide.aihandoff.WaitingSessions.getInstance(project).drafts["handoff-demo"] = "Also update the button in the mobile layout"
         edt {
             service.proposals.clear()
             service.proposeSequence(
@@ -127,8 +133,51 @@ object ScreenshotMaker {
         }
         Thread.sleep(4000)
         shot(frame, File(out, "06-sequence.png"))
-        waitingFile.delete()
+        waitingFile.delete(); listenFile.delete()
         Thread.sleep(2500)
+
+        // 7: Frage mit Auswahl (zwei Fragen, die erste beantwortet)
+        edt {
+            service.proposals.clear()
+            service.proposeAsk("Before the release", listOf(
+                app.heckit.ide.aihandoff.AskQuestion(
+                    "Which **version number** should release 2.5.0 get? The changes add a feature and fix two bugs.",
+                    listOf(
+                        app.heckit.ide.aihandoff.AskOption("2.5.0", "New feature: free shipping threshold"),
+                        app.heckit.ide.aihandoff.AskOption("2.4.1", "Only if the threshold waits for the next release"),
+                        app.heckit.ide.aihandoff.AskOption("3.0.0", "Breaking change in the cart API"),
+                    ),
+                ),
+                app.heckit.ide.aihandoff.AskQuestion(
+                    "Which channels should announce it?",
+                    listOf(app.heckit.ide.aihandoff.AskOption("Changelog"), app.heckit.ide.aihandoff.AskOption("Newsletter"), app.heckit.ide.aihandoff.AskOption("Blog post")),
+                    multiSelect = true,
+                ),
+            )).also { p -> p.questions[0].picked += 0; service.fireChanged() }
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
+        }
+        Thread.sleep(2500)
+        shot(frame, File(out, "07-ask.png"))
+
+        // 8: Handoff Tools (Dialog als eigenes Bild)
+        var tools: app.heckit.ide.aihandoff.ToolsDialog? = null
+        ApplicationManager.getApplication().invokeLater({
+            tools = app.heckit.ide.aihandoff.ToolsDialog(project, mapOf(
+                "handoff_propose_command" to 14, "handoff_wait_for_result" to 31, "handoff_begin_task" to 6, "handoff_end_task" to 6,
+                "handoff_request_review" to 5, "handoff_show_images" to 2, "handoff_ask" to 3,
+            ), "7 days")
+            tools!!.show()
+        }, ModalityState.any())
+        Thread.sleep(3000)
+        edt {
+            val w = tools!!.window
+            val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
+            val g = image.createGraphics(); g.scale(SCALE, SCALE)
+            (w as RootPaneContainer).rootPane.paint(g); g.dispose()
+            ImageIO.write(image, "png", File(out, "08-tools.png"))
+        }
+        edt { tools?.close(1) }
+        Thread.sleep(1000)
 
         // 5: Änderungen prüfen - Diff mit Zeilennotizen
         val cart = File(base, "src/cart.js")

@@ -32,6 +32,15 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   notification when a Claude Code session in the project is done or needs your input. Handoff creates
   `~/.claude/handoff/hook.sh` and adds it as a hook for Stop, Notification, UserPromptSubmit and SessionEnd in
   `~/.claude/settings.json` (backup `settings.json.bak-handoff`, existing hooks stay); switching it off removes them.
+  The "done" card shows the start of the message formatted, opens the full message in an editor tab and has a field
+  for the next prompt, which goes straight to that session (the Stop hook waits for it in the background, `asyncRewake`).
+- **Update CLAUDE.md**: after an update, pick the Handoff instructions your CLAUDE.md files don't mention yet and send
+  them to a waiting Claude Code session (or copy the prompt). The Usage tab lists each Handoff tool with its calls and
+  whether CLAUDE.md mentions it.
+- **Questions with options**: Claude asks one or more questions as a card (Back/Next), one answer or several
+  (`multiSelect`) per question, each option with a short description, plus a field for an own answer.
+- **Handoff Tools**: calls per tool; per tool a switch for the CLAUDE.md instruction (Claude edits the file on request)
+  and one for the permission (`permissions.deny` in `~/.claude/settings.json`).
 - **Notifications**: a system notification and a mark on the dock or taskbar icon when something is waiting while the
   IDE is in the background; a dot on the tool window icon and a count on the Commands tab.
 - **Images to review or choose from**: Claude shows one image (approve or dismiss) or several variants (pick one),
@@ -57,8 +66,9 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 | `handoff_end_task` | – | the files changed in the task; makes the previous changelist active again, removes the task's changelist if empty |
 | `handoff_request_review` | `summary` (one or two sentences) | an `id` at once; reviews the changelist of the current or last task, otherwise all local changes |
 | `handoff_get_notes` | – | the open line notes (`path:line`, note, line of code) and removes them; `No open notes.` |
+| `handoff_ask` | `questions` (list of `{question` (Markdown), `options` (list of `{label, description}`), `multiSelect}`), `title` (optional) | an `id` at once; one card, several questions with Back/Next, radio buttons or checkboxes and a field for an own answer per question |
 | `handoff_show_images` | `paths` (image files, absolute or relative to the project root), `question` | an `id` at once; one image to approve, several to choose from |
-| `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note and marked areas, the review result (`approved` or `changes requested` with the line notes), the dismiss note, or `pending` after the timeout (call again to keep waiting) |
+| `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note and marked areas, the review result (`approved` or `changes requested` with the line notes), the chosen options and own answer, the dismiss note, or `pending` after the timeout (call again to keep waiting) |
 
 ## Installation
 
@@ -72,10 +82,10 @@ Then:
 3. Tell Claude when to use it: **Copy CLAUDE.md Snippet** in the empty Commands tab copies a block for all tools into
    the clipboard; paste it into your `CLAUDE.md`.
 
-The built-in guide (**?** in the tool window header, source: `src/main/resources/guide/guide.md`) holds the setup, one
-prompt per feature and *What's new*. After an update the Commands tab shows the first line under the new version's
+The built-in guide (**Guide** in the tool window's ⋮ menu, source: `src/main/resources/guide/guide.md`) holds the setup, one
+prompt per feature and *Version history* (at the end). After an update the Commands tab shows the first line under the new version's
 heading once. New features: add a section with its prompt, extend the snippet between the `snippet` markers and add a
-version heading under *What's new*.
+version heading under *Version history*.
 
 ### Plan limits (optional)
 
@@ -140,6 +150,9 @@ magick $T/L.png $T/D.png +append marketplace/plugin-icon.png
 3. `./gradlew publishPlugin` with a token from https://plugins.jetbrains.com/author/me/tokens, either as
    `PUBLISH_TOKEN=…` or globally in `~/.gradle/gradle.properties` as `jetbrainsMarketplaceToken=…`.
 4. Tag the commit (`git tag v<version>`) and push.
+5. Update the custom page by hand (plugin page, *Custom Pages* tab, Markdown): `marketplace/custom-pages/user-guide.md`.
+   `publishPlugin` doesn't upload custom pages. It is the built-in guide (`src/main/resources/guide/guide.md`) without
+   title, contents and version history - copy changes from the guide over before each release.
 
 ## Regenerating the screenshots
 

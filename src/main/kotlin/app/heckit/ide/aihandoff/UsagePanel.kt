@@ -46,7 +46,7 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
     private class Turn(val time: Instant, val input: Long, val cacheWrite: Long, val cacheRead: Long, val output: Long) {
         val total get() = input + cacheWrite + cacheRead + output
     }
-    private class Session(val file: File, val title: String, val turns: List<Turn>) {
+    private class Session(val file: File, val title: String, val turns: List<Turn>, val handoffCalls: List<Pair<Instant, String>> = emptyList()) {
         val start get() = turns.first().time
         val end get() = turns.last().time
     }
@@ -82,6 +82,10 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
         javax.swing.JToggleButton(p.label).apply { addActionListener { period = p; refresh() } }
     }
     private var generation = 0
+    private var lastCalls: Map<String, Int> = emptyMap()
+    private var lastPeriod = ""
+
+    fun manageTools() { if (ToolsDialog(project, lastCalls, lastPeriod).showAndGet()) refresh() }
 
     // ---- Plan-Limits (über die Statuszeile von Claude Code) ----
     private val limits = JPanel().apply {
@@ -169,6 +173,7 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount != 2) return
                 val r = (tree.getPathForLocation(e.x, e.y)?.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? Row ?: return
+                if (r.key == "tools" || r.key?.startsWith("tool:") == true) { manageTools(); return }
                 r.file?.let { f ->
                     ApplicationManager.getApplication().invokeLater {
                         LocalFileSystem.getInstance().refreshAndFindFileByIoFile(f)?.let { OpenFileDescriptor(project, it).navigate(true) }
@@ -207,6 +212,8 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
     private fun parse(f: File): Session? {
         val seen = HashSet<String>()
         val turns = mutableListOf<Turn>()
+        val calls = mutableListOf<Pair<Instant, String>>()
+        val callIds = HashSet<String>()
         var title: String? = null
         var firstPrompt: String? = null
         f.bufferedReader().useLines { lines ->
@@ -225,6 +232,14 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
                     }
                     "assistant" -> {
                         val m = o.getAsJsonObject("message") ?: continue
+                        // Aufrufe von Handoff-Werkzeugen (mcp__<server>__handoff_…); je Inhaltsblock eine Zeile, daher vor der ID-Prüfung.
+                        if (line.contains("__handoff_")) m.getAsJsonArray("content")?.forEach { c ->
+                            val b = c.takeIf { it.isJsonObject }?.asJsonObject ?: return@forEach
+                            val name = b.str("name") ?: return@forEach
+                            if (b.str("type") == "tool_use" && name.contains("__handoff_") && callIds.add(b.str("id") ?: name + calls.size)) {
+                                o.str("timestamp")?.let { runCatching { Instant.parse(it) }.getOrNull() }?.let { calls += it to name.substringAfterLast("__") }
+                            }
+                        }
                         val u = m.getAsJsonObject("usage") ?: continue
                         val id = m.str("id") ?: o.str("requestId") ?: o.str("uuid") ?: continue
                         if (!seen.add(id)) continue
@@ -236,7 +251,7 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
         }
         if (turns.isEmpty()) return null
         turns.sortBy { it.time }
-        return Session(f, title ?: firstPrompt?.take(80) ?: f.nameWithoutExtension, turns)
+        return Session(f, title ?: firstPrompt?.take(80) ?: f.nameWithoutExtension, turns, calls)
     }
 
     private fun JsonObject.str(k: String) = get(k)?.takeIf { it.isJsonPrimitive }?.asString
@@ -269,6 +284,21 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
                 )))
             }
         }
+        // Handoff-Werkzeuge: wie oft Claude sie im Zeitraum aufgerufen hat und ob die CLAUDE.md sie nennt.
+        val counts = sessions.flatMap { it.handoffCalls }.filter { !it.first.atZone(zone).toLocalDate().isBefore(from) }.groupingBy { it.second }.eachCount()
+        val mentioned = Features.mentioned(project)
+        val denied = Permissions.denied()
+        val used = Features.allTools.count { (counts[it] ?: 0) > 0 }
+        lastCalls = counts; lastPeriod = p.label
+        val toolsNode = DefaultMutableTreeNode(Row("Handoff tools", "$used of ${Features.allTools.size} used · double-click to manage", key = "tools"))
+        Features.allTools.forEach { t ->
+            val n = counts[t] ?: 0
+            toolsNode.add(DefaultMutableTreeNode(Row(t, if (n == 0) "not used" else if (n == 1) "1 call" else "$n calls",
+                listOfNotNull(if (t in mentioned) "in CLAUDE.md" else "not in CLAUDE.md", "blocked".takeIf { t in denied }).joinToString(" · "),
+                strong = t in mentioned && t !in denied, key = "tool:$t",
+                icon = if (n > 0) AllIcons.General.InspectionsOK else AllIcons.General.InspectionsPause)))
+        }
+        root.add(toolsNode)
         model.reload()
         // Heute bzw. der jüngste Tag ist aufgeklappt, sonst was der Nutzer aufgeklappt hat.
         (0 until root.childCount).map { root.getChildAt(it) as DefaultMutableTreeNode }.forEachIndexed { i, n ->
