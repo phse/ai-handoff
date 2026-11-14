@@ -45,6 +45,8 @@ dependencies {
         }
         // MCP-Server der IDE: Über ihn bekommt Claude Code die Handoff-Werkzeuge.
         bundledPlugin("com.intellij.mcpServer")
+        // ShowDiffAction (Diff der Aufgaben-Changelist) liegt im Modul der VCS-Implementierung.
+        bundledModule("intellij.platform.vcs.impl")
     }
 }
 
@@ -60,6 +62,19 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.1.0</h3>
+            <ul>
+              <li><b>Review with line notes</b>: Claude asks you to review its changes (<code>handoff_request_review</code>). Open the
+                  diff from the card, attach notes to single lines (hover a line and click the <b>+</b>, or <i>Add Note for Claude…</i> in the
+                  context menu of the diff or editor), then approve or send the notes back. Notes left without a review are fetched with
+                  <code>handoff_get_notes</code>.</li>
+              <li><b>Command sequences</b>: several commands as one card (<code>handoff_propose_sequence</code>). Run them all or
+                  step by step; the sequence stops at the first command that fails, and Claude gets exit code and output per step.</li>
+              <li><b>Claude is waiting</b> (optional, <i>Show When Claude Is Waiting</i> in the tool window's menu): a card and a
+                  notification when a Claude Code session in the project is done or needs your input. Set up through Claude Code hooks.</li>
+              <li><b>Notifications</b>: a system notification when something is waiting while the IDE is in the background, a dot
+                  on the tool window icon and a count on the <i>Commands</i> tab.</li>
+            </ul>
             <h3>1.0.1</h3>
             <ul>
               <li>Setup help in the empty <i>Commands</i> tab: link to the MCP server settings and a ready-made CLAUDE.md snippet.</li>
@@ -114,6 +129,14 @@ val screenshotProjectDir = "/Users/Shared/handoff-demo"
 val prepareScreenshotProject = tasks.register<Sync>("prepareScreenshotProject") {
     from("marketplace/demo-project")
     into(screenshotProjectDir)
+    // Als Git-Repo mit einem Commit, damit der Helfer eine Änderung samt Diff zeigen kann (Review-Screenshot).
+    val dir = screenshotProjectDir
+    doLast {
+        fun git(vararg args: String) = ProcessBuilder(listOf("git", "-c", "user.name=Demo", "-c", "user.email=demo@example.com") + args)
+            .directory(File(dir)).redirectErrorStream(true).start().apply { inputStream.readBytes() }.waitFor()
+        File(dir, ".git").deleteRecursively()
+        git("init", "-q", "-b", "main"); git("add", "-A"); git("commit", "-q", "-m", "Initial commit")
+    }
 }
 
 tasks.runIde {

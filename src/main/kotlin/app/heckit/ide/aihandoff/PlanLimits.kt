@@ -25,8 +25,15 @@ object PlanLimits {
 
     fun isInstalled(): Boolean = script.isFile && currentCommand()?.contains("handoff/statusline.sh") == true
 
-    private fun readSettings(): JsonObject =
+    internal fun readSettings(): JsonObject =
         runCatching { JsonParser.parseString(settings.readText()).asJsonObject }.getOrNull() ?: JsonObject()
+
+    /** Einstellungen von Claude Code schreiben; der Stand davor bleibt als settings.json.bak-handoff. */
+    internal fun writeSettings(json: JsonObject) {
+        if (settings.isFile) settings.copyTo(File(settings.parentFile, "settings.json.bak-handoff"), overwrite = true)
+        settings.parentFile.mkdirs()
+        settings.writeText(GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(json) + "\n")
+    }
 
     /** Befehl der eingetragenen Statuszeile, falls vorhanden. */
     fun currentCommand(): String? = readSettings().getAsJsonObject("statusLine")?.get("command")?.takeIf { it.isJsonPrimitive }?.asString
@@ -52,10 +59,8 @@ object PlanLimits {
         )
         script.setExecutable(true)
         val json = readSettings()
-        if (settings.isFile) settings.copyTo(File(settings.parentFile, "settings.json.bak-handoff"), overwrite = true)
         json.add("statusLine", JsonObject().apply { addProperty("type", "command"); addProperty("command", COMMAND) })
-        settings.parentFile.mkdirs()
-        settings.writeText(GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(json) + "\n")
+        writeSettings(json)
     }
 
     private fun shellQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"

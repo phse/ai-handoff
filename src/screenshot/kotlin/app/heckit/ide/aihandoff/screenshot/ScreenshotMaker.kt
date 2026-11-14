@@ -110,8 +110,90 @@ object ScreenshotMaker {
         }
         Thread.sleep(3000)
         shot(frame, File(out, "04-usage.png"))
+
+        // 6: Ablauf aus mehreren Befehlen und eine wartende Claude-Session (vor Szene 5, die den Diff öffnet)
+        val waitingFile = File(app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }, "handoff-demo.json")
+        waitingFile.writeText(com.google.gson.JsonObject().apply {
+            addProperty("session_id", "handoff-demo"); addProperty("cwd", base.path); addProperty("hook_event_name", "Stop")
+            addProperty("last_assistant_message", "The checkout button now uses the pill style. Tests pass; the release steps are ready for you.")
+        }.toString())
+        edt {
+            service.proposals.clear()
+            service.proposeSequence(
+                listOf("npm test", "npm version minor", "git push --follow-tags", "npm publish"),
+                "Release 2.5.0: run the tests, bump the version, push the tag and publish the package.", base.path, true, false,
+            ).also { p -> p.steps[0].exitCode = 0; service.fireChanged() }
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
+        }
+        Thread.sleep(4000)
+        shot(frame, File(out, "06-sequence.png"))
+        waitingFile.delete()
+        Thread.sleep(2500)
+
+        // 5: Änderungen prüfen - Diff mit Zeilennotizen
+        val cart = File(base, "src/cart.js")
+        cart.writeText(CART_CHANGED)
+        val vf = edt { com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(cart) } ?: error("no cart.js")
+        write {
+            val vcs = com.intellij.openapi.vcs.ProjectLevelVcsManager.getInstance(project)
+            if (vcs.directoryMappings.isEmpty()) vcs.directoryMappings = listOf(com.intellij.openapi.vcs.VcsDirectoryMapping("", "Git"))
+            vf.refresh(false, false)
+            com.intellij.openapi.vcs.changes.VcsDirtyScopeManager.getInstance(project).markEverythingDirty()
+            service.clearFinished()
+            service.proposals.clear()
+        }
+        Thread.sleep(6000)
+        edt {
+            val document = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(vf)!!
+            val notes = app.heckit.ide.aihandoff.NotesService.getInstance(project)
+            fun line(text: String) = document.text.lines().indexOfFirst { it.contains(text) }
+            notes.add(document, vf, line("const SHIPPING"), line("const SHIPPING"), "Read this from the shop settings")
+            notes.add(document, vf, line("if (total <"), line("if (total <"), "Compare before the discount, not after")
+            service.proposeReview("Added a discount and a free-shipping threshold to the cart total.", null)
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
+            // Platz für den Diff: Projektbaum zu.
+            ToolWindowManager.getInstance(project).getToolWindow("Project")?.hide()
+            val changes = com.intellij.openapi.vcs.changes.ChangeListManager.getInstance(project).allChanges.toList()
+            log.warn("Handoff: review screenshot with ${changes.size} change(s)")
+            com.intellij.openapi.vcs.changes.actions.diff.ShowDiffAction.showDiffForChange(project, changes)
+        }
+        Thread.sleep(5000)
+        // Maus über eine Zeile im Diff: dort erscheint das "+" anstelle der Zeilennummer.
+        edt {
+            com.intellij.openapi.editor.EditorFactory.getInstance().allEditors
+                .firstOrNull { it.editorKind == com.intellij.openapi.editor.EditorKind.DIFF && it.document.text == CART_CHANGED }
+                ?.let { e ->
+                    val y = e.logicalPositionToXY(com.intellij.openapi.editor.LogicalPosition(10, 0)).y + e.lineHeight / 2
+                    e.contentComponent.dispatchEvent(java.awt.event.MouseEvent(e.contentComponent, java.awt.event.MouseEvent.MOUSE_MOVED, System.currentTimeMillis(), 0, 40, y, 0, false))
+                } ?: log.warn("Handoff: no diff editor for the hover")
+        }
+        Thread.sleep(1000)
+        shot(frame, File(out, "05-review.png"))
         log.warn("Handoff: screenshots written to $out")
     }
+
+    private val CART_CHANGED = """
+        // Cart totals. Prices are integers in cents.
+
+        const FREE_SHIPPING_FROM = 5000;
+        const SHIPPING = 490;
+
+        export function cartTotal(items, discountPercent = 0) {
+          let total = 0;
+          for (const item of items) {
+            total += item.price * item.quantity;
+          }
+          total = Math.round(total * (1 - discountPercent / 100));
+          if (total < FREE_SHIPPING_FROM) {
+            total += SHIPPING;
+          }
+          return total;
+        }
+
+        export function formatPrice(cents) {
+          return (cents / 100).toFixed(2) + ' €';
+        }
+    """.trimIndent() + "\n"
 
     /** Memory mit Index-Lücke und offenem Link, dazu Session-Protokolle der letzten Tage (erfundene, neutrale Titel). */
     private fun writeDemoClaudeData(base: File) {
@@ -173,6 +255,9 @@ object ScreenshotMaker {
         g.dispose()
         ImageIO.write(image, "png", file)
     }
+
+    /** Wie [edt], aber in schreibsicherem Kontext (VFS- und VCS-Änderungen). */
+    private fun write(block: () -> Unit) = ApplicationManager.getApplication().invokeAndWait(block, ModalityState.nonModal())
 
     private fun <T> edt(block: () -> T): T {
         var result: Result<T>? = null

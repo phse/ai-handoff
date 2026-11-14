@@ -73,9 +73,17 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                 val size = JBUI.CurrentTheme.Toolbar.stripeToolbarButtonIconSize()
                 if (size >= 20) "/icons/expui/toolwindow/handoff@20x20$dark.svg" else "/icons/expui/toolwindow/handoff$dark.svg"
             } else "/icons/handoff$dark.svg"
-            iconUrl(path)?.let { url -> com.intellij.openapi.util.IconLoader.findIcon(url, false)?.let { toolWindow.setIcon(it) } }
+            val waiting = toolWindow.project.getServiceIfCreated(HandoffService::class.java)?.pendingCount ?: 0
+            iconUrl(path)?.let { url -> com.intellij.openapi.util.IconLoader.findIcon(url, false) }?.let { icon ->
+                // Punkt am Symbol, solange eine Übergabe auf den Nutzer wartet.
+                toolWindow.setIcon(if (waiting > 0) com.intellij.ui.IconManager.getInstance().withIconBadge(icon, JBColor(0xB04079, 0xC86A9A)) else icon)
+            }
         }
         update()
+        HandoffService.getInstance(toolWindow.project).addListener({ update() }, toolWindow.disposable)
+        NoteGutter.installAll()
+        // Auch hier, falls das Plugin ohne Neustart geladen wurde (dann läuft die Startaktivität nicht).
+        WaitingSessions.getInstance(toolWindow.project).start()
         val bus = ApplicationManager.getApplication().messageBus.connect(toolWindow.disposable)
         bus.subscribe(com.intellij.ide.ui.LafManagerListener.TOPIC, com.intellij.ide.ui.LafManagerListener { update() })
         bus.subscribe(com.intellij.ide.ui.UISettingsListener.TOPIC, com.intellij.ide.ui.UISettingsListener { update() })
@@ -86,6 +94,11 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
         val content = ContentFactory.getInstance().createContent(panel, "Commands", false)
         content.setDisposer(panel)
         toolWindow.contentManager.addContent(content)
+        // Zahl der wartenden Übergaben im Reiternamen.
+        HandoffService.getInstance(project).addListener({
+            val n = HandoffService.getInstance(project).pendingCount
+            content.displayName = if (n > 0) "Commands ($n)" else "Commands"
+        }, panel)
         val memory = MemoryPanel(project)
         toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(memory, "Memory", false).apply { setDisposer(memory) })
         val usage = UsagePanel(project)
@@ -97,6 +110,24 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                 if (event.operation == com.intellij.ui.content.ContentManagerEvent.ContentOperation.add && event.content.component === usage) usage.refresh()
             }
         })
+        toolWindow.setAdditionalGearActions(com.intellij.openapi.actionSystem.DefaultActionGroup(
+            object : com.intellij.openapi.actionSystem.ToggleAction("Show When Claude Is Waiting", "Adds hooks to Claude Code that tell the IDE when a session is done or needs your input", null), DumbAware {
+                override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+                override fun isSelected(e: AnActionEvent) = WaitingHook.isInstalled()
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    if (state) {
+                        val msg = "Handoff will create ~/.claude/handoff/hook.sh and add it as a hook for Stop, Notification, UserPromptSubmit and " +
+                            "SessionEnd in ~/.claude/settings.json (a backup is kept as settings.json.bak-handoff). Existing hooks stay.\n\n" +
+                            "When a Claude Code session in this project is done or needs your input, the Commands tab shows a card and, " +
+                            "if the IDE is in the background, you get a system notification. Applies to sessions started afterwards."
+                        if (Messages.showOkCancelDialog(project, msg, "Show When Claude Is Waiting", "Set Up", "Cancel", null) != Messages.OK) return
+                    }
+                    runCatching { if (state) WaitingHook.install() else WaitingHook.uninstall() }.onFailure {
+                        Messages.showErrorDialog(project, it.message ?: it.toString(), "Show When Claude Is Waiting")
+                    }
+                }
+            },
+        ))
         fun selected() = toolWindow.contentManager.selectedContent?.component
         fun isMemory() = selected() === memory || selected() === usage
         toolWindow.setTitleActions(listOf(
@@ -132,14 +163,26 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
 
     init {
         add(JBScrollPane(list).apply { border = JBUI.Borders.empty() }, BorderLayout.CENTER)
-        Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
+        // Nicht in Screenshot-Läufen: Dort gilt die Sandbox als "gerade aktualisiert".
+        if (System.getProperty("handoff.screenshots") == null) Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
         service.addListener({ rebuild() }, this)
         rebuild()
     }
 
     private fun rebuild() {
         list.removeAll()
-        if (service.proposals.isEmpty()) list.add(emptyState())
+        val notes = NotesService.getInstance(project).all()
+        val waiting = project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty()
+        if (service.proposals.isEmpty() && notes.isEmpty() && waiting.isEmpty()) list.add(emptyState())
+        waiting.forEach {
+            list.add(waitingCard(it))
+            list.add(Box.createVerticalStrut(JBUI.scale(8)))
+        }
+        // Notizen ohne wartende Prüfung: eigene Karte, bis Claude sie abholt. Sonst stehen sie in der Prüfkarte.
+        if (notes.isNotEmpty() && service.proposals.none { it.review && it.isPending }) {
+            list.add(notesCard(notes))
+            list.add(Box.createVerticalStrut(JBUI.scale(8)))
+        }
         service.proposals.forEach {
             list.add(card(it))
             list.add(Box.createVerticalStrut(JBUI.scale(8)))
@@ -186,7 +229,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         fun close() { Guide.markNewsSeen(); remove(banner); revalidate(); repaint() }
         banner.border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(6, 10))
         banner.background = JBColor.namedColor("Banner.infoBackground", JBColor(0xF5F8FE, 0x25324D))
-        banner.add(JBLabel("<html><b>New in $version:</b> ${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(news.replace("**", ""))}</html>"), BorderLayout.CENTER)
+        banner.add(JBLabel("<html><b>New in $version:</b> ${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(news.replace("**", "").replace("`", ""))}</html>"), BorderLayout.CENTER)
         banner.add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0)).apply {
             isOpaque = false
             add(com.intellij.ui.components.ActionLink("What's new") { Guide.open(project); close() })
@@ -195,7 +238,259 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         return banner
     }
 
+    private fun cardPanel(accent: java.awt.Color) = object : JPanel(BorderLayout(0, JBUI.scale(6))) {
+        override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
+    }.apply {
+        border = JBUI.Borders.compound(RoundedLineBorder(accent, JBUI.scale(8), JBUI.scale(1)), JBUI.Borders.empty(8, 10))
+        alignmentX = LEFT_ALIGNMENT
+    }
+
+    private fun wrapped(text: String) = JBTextArea(text).apply {
+        font = UIUtil.getLabelFont(); isEditable = false; lineWrap = true; wrapStyleWord = true; isOpaque = false; border = null
+        alignmentX = LEFT_ALIGNMENT
+    }
+
+    private fun grey(text: String) = JBLabel(text).apply {
+        foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont(); alignmentX = LEFT_ALIGNMENT
+    }
+
+    /** Zeilennotizen als Liste: Klick springt zur Stelle. */
+    private fun notesList(notes: List<LineNote>) = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false; alignmentX = LEFT_ALIGNMENT
+        val base = project.basePath.orEmpty().trimEnd('/') + "/"
+        notes.forEach { n ->
+            val l = n.lines
+            val where = n.file.path.removePrefix(base).substringAfterLast('/') + ":" + (l.first + 1)
+            add(JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
+                isOpaque = false; alignmentX = LEFT_ALIGNMENT
+                add(link(where) { NotesService.getInstance(project).navigate(n) }.apply { toolTipText = n.file.path.removePrefix(base) }, BorderLayout.WEST)
+                add(JBLabel(n.text.lineSequence().first()).apply { toolTipText = n.text }, BorderLayout.CENTER)
+                maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+            })
+        }
+    }
+
+    /** Notizen, die noch niemand abgeholt hat. */
+    private fun notesCard(notes: List<LineNote>): JPanel {
+        val card = cardPanel(NotesService.COLOR)
+        card.add(JBLabel(if (notes.size == 1) "1 note for Claude" else "${notes.size} notes for Claude").apply { foreground = NotesService.COLOR }, BorderLayout.NORTH)
+        card.add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            add(notesList(notes))
+            add(Box.createVerticalStrut(JBUI.scale(6)))
+            add(wrapped("Tell Claude to read your notes; they also go along with the next review.").apply { foreground = UIUtil.getContextHelpForeground() })
+        }, BorderLayout.CENTER)
+        card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+            isOpaque = false
+            add(JButton("Clear Notes").apply { addActionListener { NotesService.getInstance(project).clear() } })
+        }, BorderLayout.SOUTH)
+        return card
+    }
+
+    private fun changes(p: Proposal): List<com.intellij.openapi.vcs.changes.Change> {
+        val clm = com.intellij.openapi.vcs.changes.ChangeListManager.getInstance(project)
+        val list = p.changelist?.let { clm.findChangeList(it)?.changes } ?: clm.allChanges
+        return list.sortedBy { (it.afterRevision ?: it.beforeRevision)?.file?.path.orEmpty() }
+    }
+
+    private fun showDiff(changes: List<com.intellij.openapi.vcs.changes.Change>, index: Int) {
+        if (changes.isEmpty()) return
+        // Aus dem Swing-Listener ohne Write-Intent-Lock - deshalb per invokeLater.
+        ApplicationManager.getApplication().invokeLater({
+            com.intellij.openapi.vcs.changes.actions.diff.ShowDiffAction.showDiffForChange(project, changes, index)
+        }, project.disposed)
+    }
+
+    /** Karte „Änderungen prüfen“: Dateien der Aufgabe, Diff, Zeilennotizen, dann Freigabe oder Notizen zurück. */
+    private fun reviewCard(p: Proposal): JPanel {
+        val pending = p.isPending
+        val notes = if (pending) NotesService.getInstance(project).all() else emptyList()
+        val requested = p.lineNotes != null || p.note != null
+        val accent = when (p.state) {
+            Proposal.State.FINISHED -> if (requested) JBColor(0xC27D2A, 0xD9A05B) else JBColor(0x5A9E6F, 0x5A9E6F)
+            Proposal.State.PENDING -> NotesService.COLOR
+            else -> JBColor.border()
+        }
+        val card = cardPanel(accent)
+        val status = when (p.state) {
+            Proposal.State.PENDING -> "Review changes" + (p.changelist?.let { " · $it" } ?: "")
+            Proposal.State.FINISHED -> if (requested) "Changes requested" else "Approved"
+            else -> "Dismissed"
+        } + (p.note?.let { ": $it" } ?: "")
+        card.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+
+        val changes = if (pending) changes(p) else emptyList()
+        val base = project.basePath.orEmpty().trimEnd('/') + "/"
+        card.add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            add(wrapped(p.reason))
+            if (pending) {
+                add(Box.createVerticalStrut(JBUI.scale(6)))
+                if (changes.isEmpty()) add(grey("No local changes found."))
+                changes.forEachIndexed { i, c ->
+                    val path = (c.afterRevision ?: c.beforeRevision)?.file?.path.orEmpty().removePrefix(base)
+                    add(link(path) { showDiff(changes, i) }.apply { toolTipText = "Show diff" })
+                }
+                add(Box.createVerticalStrut(JBUI.scale(6)))
+                if (notes.isEmpty()) add(wrapped("To request a change, hover a line in the diff or editor and click the + next to its line number.")
+                    .apply { foreground = UIUtil.getContextHelpForeground() })
+                else { add(grey(if (notes.size == 1) "1 line note" else "${notes.size} line notes")); add(notesList(notes)) }
+            } else p.lineNotes?.let {
+                add(Box.createVerticalStrut(JBUI.scale(4)))
+                add(wrapped(it).apply { foreground = UIUtil.getContextHelpForeground() })
+            }
+        }, BorderLayout.CENTER)
+
+        if (pending) {
+            val note = JBTextField(p.noteDraft).apply {
+                emptyText.text = "Optional note for Claude"
+                document.addDocumentListener(object : DocumentAdapter() {
+                    override fun textChanged(e: DocumentEvent) { p.noteDraft = text }
+                })
+            }
+            val diff = JButton("Show Diff").apply { isEnabled = changes.isNotEmpty(); addActionListener { showDiff(changes, 0) } }
+            // Mit Notizen (an Zeilen oder im Feld) ist es ein Änderungswunsch, sonst eine Freigabe.
+            val finish = JButton(if (notes.isEmpty()) "Approve" else if (notes.size == 1) "Send 1 Note" else "Send ${notes.size} Notes").apply {
+                toolTipText = "A note in the field below turns an approval into a change request"
+                addActionListener { service.finishReview(p, note.text) }
+            }
+            finish.putClientProperty("JButton.buttonType", "default")
+            val dismiss = JButton("Dismiss").apply {
+                toolTipText = "Skip the review; line notes stay"
+                addActionListener { service.dismiss(p, note.text) }
+            }
+            card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+                isOpaque = false
+                add(note, BorderLayout.NORTH)
+                add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                    isOpaque = false
+                    listOf(diff, finish, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
+                }, BorderLayout.SOUTH)
+            }, BorderLayout.SOUTH)
+        }
+        return card
+    }
+
+    /** Eine Claude-Session wartet: fertig (Stop) oder braucht eine Eingabe (Notification). */
+    private fun waitingCard(s: WaitingSession): JPanel {
+        val accent = if (s.finished) JBColor(0x2A7AA0, 0x5AA8D0) else JBColor(0xB04079, 0xC86A9A)
+        val card = cardPanel(accent)
+        card.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(JBLabel(if (s.finished) "Claude is done" else "Claude is waiting for you").apply { foreground = accent }, BorderLayout.WEST)
+            add(JBLabel(time.format(Date(s.at))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+        card.add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            val text = s.text.lines().filter { it.isNotBlank() }.take(4).joinToString("\n").let { if (it.length > 320) it.take(320) + "…" else it }
+            if (text.isNotEmpty()) add(wrapped(text))
+            val base = project.basePath.orEmpty().trimEnd('/')
+            if (s.cwd != base) add(grey(s.cwd.removePrefix("$base/")))
+        }, BorderLayout.CENTER)
+        card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+            isOpaque = false
+            add(JButton("Dismiss").apply { addActionListener { WaitingSessions.getInstance(project).dismiss(s) } })
+        }, BorderLayout.SOUTH)
+        return card
+    }
+
+    /** Ablauf aus mehreren Befehlen: alle nacheinander oder Schritt für Schritt, Stopp beim ersten Fehler. */
+    private fun sequenceCard(p: Proposal): JPanel {
+        val n = p.steps.size
+        val failed = p.steps.indexOfFirst { (it.exitCode ?: 0) != 0 }
+        val next = p.steps.indexOfFirst { it.exitCode == null }
+        val pending = p.isPending
+        val accent = when {
+            p.state == Proposal.State.FINISHED && failed < 0 -> JBColor(0x5A9E6F, 0x5A9E6F)
+            p.state == Proposal.State.FINISHED -> JBColor(0xC75450, 0xC75450)
+            p.risky && pending -> JBColor(0xB04079, 0xC86A9A)
+            else -> JBColor.border()
+        }
+        val card = cardPanel(accent)
+        val status = when (p.state) {
+            Proposal.State.PENDING -> listOfNotNull(
+                if (next > 0) "$next of $n steps done" else "Waiting · $n steps", "risky".takeIf { p.risky }, "needs input".takeIf { p.interactive },
+            ).joinToString(" · ")
+            Proposal.State.RUNNING -> "Running step ${p.steps.indexOfFirst { it.running } + 1} of $n" + if (p.interactive) " · type input in the Run window" else "…"
+            Proposal.State.FINISHED -> if (failed < 0) "Done · $n steps" else "Failed at step ${failed + 1} of $n (exit ${p.steps[failed].exitCode})"
+            Proposal.State.DISMISSED -> "Dismissed" + (p.note?.let { ": $it" } ?: "")
+        }
+        card.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+
+        val fields = ArrayList<Pair<Step, JBTextArea>>()
+        card.add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            add(wrapped(p.reason))
+            add(Box.createVerticalStrut(JBUI.scale(4)))
+            p.steps.forEachIndexed { i, s ->
+                val code = s.exitCode
+                val icon = when {
+                    s.running -> com.intellij.ui.AnimatedIcon.Default()
+                    code == null -> AllIcons.RunConfigurations.TestNotRan
+                    code == 0 -> AllIcons.RunConfigurations.TestPassed
+                    else -> AllIcons.RunConfigurations.TestFailed
+                }
+                val field = JBTextArea(s.command).apply {
+                    font = JBUI.Fonts.create(java.awt.Font.MONOSPACED, UIUtil.getLabelFont().size)
+                    lineWrap = true; isEditable = pending && code == null
+                    border = JBUI.Borders.empty(4, 6)
+                    background = JBColor.namedColor("Editor.background", UIUtil.getTextFieldBackground())
+                }
+                if (field.isEditable) fields.add(s to field)
+                add(JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
+                    isOpaque = false; alignmentX = LEFT_ALIGNMENT
+                    add(JBLabel("${i + 1}", icon, JBLabel.LEFT).apply {
+                        verticalAlignment = JBLabel.TOP; border = JBUI.Borders.emptyTop(4)
+                        foreground = UIUtil.getContextHelpForeground()
+                        toolTipText = when { s.running -> "Running"; code == null -> "Not run yet"; code == 0 -> "Done"; else -> "Failed (exit $code)" }
+                    }, BorderLayout.WEST)
+                    add(field, BorderLayout.CENTER)
+                })
+                add(Box.createVerticalStrut(JBUI.scale(4)))
+            }
+            add(grey(p.workingDir.replace(System.getProperty("user.home"), "~")))
+        }, BorderLayout.CENTER)
+
+        if (pending) {
+            // Swing-Listener laufen ohne Write-Intent-Lock; das Run-Fenster braucht ihn - also per invokeLater.
+            fun start(all: Boolean) {
+                fields.forEach { (s, f) -> f.text.trim().takeIf { it.isNotEmpty() }?.let { s.command = it } }
+                ApplicationManager.getApplication().invokeLater({ CommandRunner.runSteps(project, p, all) }, project.disposed)
+            }
+            val all = JButton(if (next > 0) "Run Remaining" else "Run All", AllIcons.Actions.Execute).apply {
+                toolTipText = "Runs the steps one after another in the Run tool window and stops at the first one that fails"
+                addActionListener { start(true) }
+            }
+            all.putClientProperty("JButton.buttonType", "default")
+            val one = JButton("Run Step ${next + 1}").apply {
+                toolTipText = "Runs only the next step"
+                addActionListener { start(false) }
+            }
+            val dismiss = JButton("Dismiss…").apply {
+                addActionListener {
+                    val note = Messages.showInputDialog(project, "Optional note for Claude:", "Dismiss Commands", null)
+                    if (note != null) service.dismiss(p, note)
+                }
+            }
+            card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                listOf(all, one, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
+            }, BorderLayout.SOUTH)
+        }
+        return card
+    }
+
     private fun card(p: Proposal): JPanel {
+        if (p.review) return reviewCard(p)
+        if (p.steps.isNotEmpty()) return sequenceCard(p)
         if (p.images.isNotEmpty()) return imageCard(p)
         val accent = when {
             p.state == Proposal.State.FINISHED && p.exitCode == 0 -> JBColor(0x5A9E6F, 0x5A9E6F)

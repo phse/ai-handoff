@@ -21,6 +21,12 @@
   <li><b>Result back to Claude</b>: exit code and the last lines of output, no copy and paste.</li>
   <li><b>One changelist per task</b>: files Claude changes for a task land in their own changelist "Claude: &lt;task&gt;",
       ready to review and commit on their own.</li>
+  <li><b>Review with line notes</b>: Claude asks you to review its changes; open the diff, attach notes to single lines
+      (hover a line, click the <b>+</b>) and approve or send the notes back, each with path, line and code.</li>
+  <li><b>Command sequences</b>: several commands as one card, run all or step by step, stops at the first failure.</li>
+  <li><b>Claude is waiting</b> (optional): a card and a notification when a Claude Code session in the project is done or
+      needs your input.</li>
+  <li><b>Notifications</b> when something is waiting while the IDE is in the background.</li>
   <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging
       lets you mark areas with a frame and a note for Claude, right on the image.</li>
   <li><b>Memory</b>: everything Claude Code loads into each session (CLAUDE.md files, imports, project memory) as a tree with token
@@ -32,7 +38,7 @@
 <h3>Setup</h3>
 <ul>
   <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
-  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
+  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_propose_sequence</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_request_review</code>, <code>handoff_get_notes</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
   <li>Tell Claude when to use them: the empty <i>Commands</i> tab copies a ready-made snippet for your <code>CLAUDE.md</code>.</li>
   <li>The built-in guide (<b>?</b> in the tool window header) lists the setup and a prompt per feature.</li>
 </ul>
@@ -53,7 +59,18 @@
                     factoryClass="app.heckit.ide.aihandoff.HandoffToolWindowFactory"/>
         <mcpServer.mcpToolset implementation="app.heckit.ide.aihandoff.HandoffToolset"/>
         <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
+        <editorFactoryListener implementation="app.heckit.ide.aihandoff.NoteGutterInstaller"/>
+        <editor.linePainter implementation="app.heckit.ide.aihandoff.NoteLinePainter"/>
     </extensions>
+    <actions>
+        <action id="Handoff.AddNote" class="app.heckit.ide.aihandoff.AddNoteAction" text="Add Note for Claude…"
+                description="Attach a note for Claude Code to this line; Claude gets it with the next review or on request"
+                icon="AllIcons.General.Balloon">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="Diff.EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="EditorGutterPopupMenu" anchor="last"/>
+        </action>
+    </actions>
     <applicationListeners>
         <listener class="app.heckit.ide.aihandoff.UnloadCleanup" topic="com.intellij.ide.plugins.DynamicPluginListener"/>
     </applicationListeners>

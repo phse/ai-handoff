@@ -20,6 +20,20 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 - **Result back to Claude**: exit code and the last 60 lines of output. After the run the card turns green or red.
 - **One changelist per task**: Claude can open the changelist "Claude: <task>" before it edits files. Everything
   changed until the task ends lands there (new files are added to Git), so you review and commit the task on its own.
+- **Review with line notes**: Claude asks you to review its changes. The card lists the changed files of the task and
+  opens their diff. Hover a line in the diff (or, while a review is waiting, in the editor) and click the **+** next to its line number, or use **Add Note for
+  Claude…** in the context menu of the diff or editor (select several lines for a range); the note shows as a gutter icon and grey text at the end of the line. **Approve**, or **Send Notes**: Claude
+  gets each note with path, line and the line of code. Notes left without a review wait in a card until Claude
+  fetches them. Notes are kept in memory only.
+- **Command sequences**: several commands as one card (verify, tag, push, upload). **Run All** runs them one after
+  another and stops at the first one that fails, **Run Step n** runs only the next one; each command can be edited.
+  Claude gets exit code and output per step.
+- **Claude is waiting** (optional, **Show When Claude Is Waiting** in the tool window's ⋮ menu): a card and a
+  notification when a Claude Code session in the project is done or needs your input. Handoff creates
+  `~/.claude/handoff/hook.sh` and adds it as a hook for Stop, Notification, UserPromptSubmit and SessionEnd in
+  `~/.claude/settings.json` (backup `settings.json.bak-handoff`, existing hooks stay); switching it off removes them.
+- **Notifications**: a system notification and a mark on the dock or taskbar icon when something is waiting while the
+  IDE is in the background; a dot on the tool window icon and a count on the Commands tab.
 - **Images to review or choose from**: Claude shows one image (approve or dismiss) or several variants (pick one),
   with an optional note. Hover a thumbnail to open it in the viewer or in an editor tab.
 - **Viewer with marks**: page with ← →, zoom with + / − / 1 (actual size) / 0 (fit). The pen tool draws a frame; write
@@ -38,10 +52,13 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 | Tool | Parameters | Returns |
 |---|---|---|
 | `handoff_propose_command` | `command` (string), `reason` (string, one sentence), `workingDirectory` (absolute or relative to the project root, empty = root), `risky` (boolean, default `false`) | an `id` at once; opens the tool window |
+| `handoff_propose_sequence` | `commands` (list of strings, in order), `reason`, `workingDirectory`, `risky`, `interactive` | an `id` at once; one card, stops at the first failing command; `handoff_wait_for_result` returns exit code and output per step |
 | `handoff_begin_task` | `title` (a few words) | makes the new changelist `Claude: <title>` the active one |
 | `handoff_end_task` | – | the files changed in the task; makes the previous changelist active again, removes the task's changelist if empty |
+| `handoff_request_review` | `summary` (one or two sentences) | an `id` at once; reviews the changelist of the current or last task, otherwise all local changes |
+| `handoff_get_notes` | – | the open line notes (`path:line`, note, line of code) and removes them; `No open notes.` |
 | `handoff_show_images` | `paths` (image files, absolute or relative to the project root), `question` | an `id` at once; one image to approve, several to choose from |
-| `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note and marked areas, the dismiss note, or `pending` after the timeout (call again to keep waiting) |
+| `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note and marked areas, the review result (`approved` or `changes requested` with the line notes), the dismiss note, or `pending` after the timeout (call again to keep waiting) |
 
 ## Installation
 

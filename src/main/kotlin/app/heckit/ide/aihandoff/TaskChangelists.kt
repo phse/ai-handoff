@@ -23,6 +23,17 @@ import kotlin.coroutines.resume
 class TaskChangelists(private val project: Project) {
     private var previousDefault: String? = null
     private var current: String? = null
+    private var last: String? = null
+
+    /**
+     * Changelist für eine Prüfung: die der laufenden, sonst der zuletzt beendeten Aufgabe (falls es sie noch gibt).
+     * Vorher den Stand der Platte einlesen und neue Dateien der laufenden Aufgabe aufnehmen - sonst fehlen sie im Diff.
+     */
+    suspend fun prepareReview(): String? {
+        syncChanges()
+        if (current != null) addNewFiles()
+        return current ?: last?.takeIf { ChangeListManager.getInstance(project).findChangeList(it) != null }
+    }
     private var startedAt = 0L
 
     suspend fun begin(title: String): String {
@@ -56,6 +67,7 @@ class TaskChangelists(private val project: Project) {
             previousDefault?.let { prev -> clm.findChangeList(prev)?.let { clm.setDefaultChangeList(it) } }
             // Leere Liste selbst entfernen - sonst fragt die IDE per Dialog nach.
             if (files.isEmpty()) clm.findChangeList(name)?.let { if (!it.isDefault) clm.removeChangeList(it) }
+            last = name
             current = null
             previousDefault = null
             name to files
