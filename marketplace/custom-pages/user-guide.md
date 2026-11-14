@@ -44,6 +44,9 @@ If the MCP tools handoff_* are available, use them:
 - Questions with options for me (which variant, which findings to save): ask them
   with handoff_ask (options with a short description, multiSelect when several fit)
   instead of in the terminal, and wait with handoff_wait_for_result.
+- Link what I should open, as Markdown links: files as [name](/abs/path:line),
+  settings as [MCP Server](settings:MCP%20Server), IDE actions as
+  [Find Action](action:GotoAction). The Handoff session tab opens them in the IDE.
 ```
 
 ## The Commands tab
@@ -117,7 +120,8 @@ and wait with handoff_wait_for_result.
 ### Images to review or choose from
 
 One image to approve, or several variants to pick one. The eye icon opens a viewer with zoom and paging (← →), where you
-mark areas with a frame and a note for Claude.
+mark areas with a frame and a note for Claude: drag on a free spot to draw a frame, click a frame to select it (drag its
+corners to resize, its number to move it).
 
 **Tools:** `handoff_show_images`, `handoff_wait_for_result`.
 
@@ -169,8 +173,8 @@ title; after the last change call handoff_end_task.
 
 Optional: **Show When Claude Is Waiting** in the tool window's **⋮** menu. A card in the Commands tab then shows when a
 Claude Code session in this project is done (with the start of its last message) or needs your input (permission
-prompt, question), together with the dot, the count and the system notification described above. The card disappears
-with your next prompt in that session, or with **Dismiss**. No prompt needed.
+prompt, question), together with the dot, the count and the system notification described above. After your next
+prompt the card turns into "Claude is working…" until Claude is done again; **Dismiss** hides it. No prompt needed.
 
 The "done" card shows the start of Claude's last message, formatted. **Open Full Message** shows all of it in an
 editor tab. Type your next prompt into the card's field and press **Enter** (**Shift+Enter** for a new line): it goes
@@ -179,11 +183,55 @@ instead works as before. The field appears for sessions started after the hooks 
 version.
 
 Claude Code reports this only through hooks, so Handoff creates `~/.claude/handoff/hook.sh` and adds it to
-`~/.claude/settings.json` for the events Stop, Notification, UserPromptSubmit and SessionEnd (backup:
+`~/.claude/settings.json` for the events SessionStart, Stop, Notification, UserPromptSubmit and SessionEnd (backup:
 `settings.json.bak-handoff`); existing hooks stay. The script keeps one small file per waiting session in
 `~/.claude/handoff/waiting/`. The Stop hook runs in the background (`asyncRewake`) and waits up to a day for a prompt
 from the card; it ends as soon as you type in the terminal. It applies to sessions started afterwards and only to sessions whose working directory
 is the project folder or below it. Switching the menu item off removes the hooks and the script.
+
+## Claude sessions in editor tabs
+
+**New Claude Session** (**⌘N** / **File | New** next to *Agent Session*, the **+** in the tool window's title bar, the
+**⋮** menu, or *Find Action*) starts Claude Code
+in a terminal tab in the background and opens the session in an editor tab:
+
+- At the top, the conversation from the session's transcript, Claude's messages formatted, tool calls as grey lines.
+- At the bottom, a field for your prompt: **Enter** sends it, **Shift+Enter** adds a line. It goes to the terminal as
+  if you had typed it, so slash commands like `/clear` or `/compact` work too. After `/clear` the tab follows the new
+  session.
+- `/resume ` (with a space) lists the project's earlier sessions by title and time; pick one to get `/resume <id>`.
+- Type `/` in the prompt field: a list suggests slash commands (built-in ones, your commands and skills, those of your
+  plugins). **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes. Only where slash commands reach the session.
+- While Claude works, a spinner below the last prompt shows it. A prompt you send meanwhile shows grey as *Queued*:
+  Claude reads it after its current step and keeps working on the task with it (it does not stop).
+- The header shows your plan limits (5 hours, week; reset times as tooltip) and, for the session that last updated the
+  status line, model and context use. Needs **Show Plan Limits…** from the Usage tab to be set up.
+- Links in Claude's messages open in the IDE: file paths (absolute or relative, with `:line`), also file names in
+  code spans like `src/Foo.kt:12`, plain web addresses and existing absolute paths in the text; `settings:<Name>` opens a
+  settings page, `action:<ActionId>` runs an IDE action. Right-click a link for **Reveal in Finder**, **Open in
+  Terminal**, **Copy Path** or **Copy Link**. Sessions started from Handoff are told at start to link as much as possible.
+- Drop image files onto the prompt field, or paste a screenshot (⌘V): the prompt gets the file path, and Claude reads
+  the image. Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
+  draw frames with a note each, and the prompt gets them as pixel areas with the notes. Opening it again shows the frames
+  from the prompt, and saving replaces them.
+- Waiting Handoff cards (commands to run, questions, reviews, images) show at the end of the conversation too, so you
+  can answer there without switching to the tool window.
+- Session tabs open again after an IDE restart. If the session no longer runs in the IDE terminal, **Resume** (next to
+  the prompt field, or **Resume in Terminal** at the top) continues it (`claude --resume`) in a new terminal tab.
+- While Claude works: **Interrupt (Esc)**. When Claude asks for a permission: **Yes**, **Yes, Don't Ask Again** and
+  **No** (the keys 1, 2 and Esc in the terminal). **Show Terminal** brings up the terminal tab for anything else.
+
+In a running Claude Code session, type `/show-in-editor`: the IDE opens the session's editor tab (or brings it to the
+front). The hook catches the command, so Claude never sees it. If the session runs in the IDE's terminal, the tab
+takes it over like one started from Handoff (prompts, slash commands, buttons). For sessions in other terminals the tab
+shows the conversation; prompts reach Claude only while it is done ("Claude is done"), and slash commands only through the
+terminal. The "done", "waiting" and "working" cards have **Open in Editor**.
+
+This needs the hooks from **Show When Claude Is Waiting** (Handoff offers to set them up) and the IDE's terminal
+(2026.1 or later). Handoff marks its terminal tabs with the environment variable `HANDOFF_TAB`, so it knows which
+session runs where. Starting sessions and sending input use the IDE's terminal API, which JetBrains marks as
+experimental: a future IDE version may change it, and then only this part stops working. Setting up the hooks also adds `~/.claude/commands/show-in-editor.md` (unless you have your own
+command of that name).
 
 ## Memory tab
 
@@ -217,6 +265,7 @@ The **⋮** menu of the tool window:
 
 | Entry | What it does |
 |---|---|
+| **New Claude Session** | Claude Code in a terminal tab in the background, the session in an editor tab (also ⌘N, **+**). |
 | **Guide** | Opens this guide in the IDE. |
 | **Handoff Tools…** | Calls per feature; switch its CLAUDE.md instruction and its permission. |
 | **Update CLAUDE.md Instructions…** | Lets Claude add the instructions your CLAUDE.md is missing. |
@@ -227,7 +276,7 @@ The **⋮** menu of the tool window:
 ## Keeping your CLAUDE.md up to date
 
 Claude only uses a tool when your `CLAUDE.md` says so - on first setup and whenever a new version brings new tools. **Update CLAUDE.md
-Instructions…**(in the **⋮** menu, the notice after an update and the empty Commands tab) lists the snippet lines whose
+Instructions…** (in the **⋮** menu, the notice after an update and the empty Commands tab) lists the snippet lines whose
 tools your `CLAUDE.md` files (global, project, parent folders and their `@` imports) don't mention yet. Choose the ones
 you want: **Send to Claude** hands the prompt to a Claude Code session of this project that is done and waiting (see
 *When Claude is waiting*), **Copy Prompt** puts it on the clipboard.

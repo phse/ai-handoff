@@ -45,24 +45,8 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.WrapLayout
 
 class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
-    /**
-     * Fenster-Icon per Datei-Adresse statt per Pfad in der plugin.xml. Ein pfadbasiertes Icon hängt an unserem Classloader,
-     * und die IDE behält es nach einem Plugin-Update bis zu 10 min im Speicher für ausgegraute Icons (iconToDisabledIcon wird
-     * beim Entladen nicht geleert, IJPL-252580, behoben ab 2027.1) - dann bleibt die alte Plugin-Version geladen. Ohne Classloader findet die IDE aber keine
-     * Varianten mehr; deshalb wählen wir Größe (neue Oberfläche 16/20 px, alte 13 px) und hell/dunkel selbst.
-     */
-    /**
-     * Icon als Datei im Temp-Ordner der IDE: Eine jar-URL lieferte nach einem Hot-Reload kein Bild mehr (die JAR wird unter
-     * gleichem Namen ersetzt, der Zip-Cache der IDE kennt noch die alte). Die Datei-URL hängt weder an JAR noch Classloader.
-     */
-    private fun iconUrl(path: String): java.net.URL? = runCatching {
-        val bytes = javaClass.getResourceAsStream(path)?.use { it.readBytes() } ?: return null
-        val dir = java.io.File(com.intellij.openapi.application.PathManager.getTempPath(), "handoff-icons").apply { mkdirs() }
-        // Name aus Inhalt, damit eine geänderte Grafik nicht aus einem Cache der alten Datei kommt.
-        val file = java.io.File(dir, path.substringAfterLast('/').removeSuffix(".svg") + "-" + bytes.contentHashCode().toUInt().toString(16) + ".svg")
-        if (!file.isFile) file.writeBytes(bytes)
-        file.toURI().toURL()
-    }.getOrNull()
+    /** Fenster-Icon per Datei-Adresse, siehe [HandoffIcons]; Größe (neue Oberfläche 16/20 px, alte 13 px) und hell/dunkel wählen wir selbst. */
+    private fun iconUrl(path: String) = HandoffIcons.url(path)
 
     override fun init(toolWindow: ToolWindow) {
         fun update() {
@@ -116,7 +100,10 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
                 override fun isSelected(e: AnActionEvent) = get()
                 override fun setSelected(e: AnActionEvent, state: Boolean) { set(state); HandoffService.getInstance(project).fireChanged() }
             }
+        val newSession = com.intellij.openapi.actionSystem.ActionManager.getInstance().getAction("Handoff.NewClaudeSession")
         toolWindow.setAdditionalGearActions(com.intellij.openapi.actionSystem.DefaultActionGroup(
+            newSession,
+            com.intellij.openapi.actionSystem.Separator.create(),
             object : AnAction("Guide", "Setup, a CLAUDE.md prompt per feature and what's new", AllIcons.Actions.Help), DumbAware {
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
                 override fun actionPerformed(e: AnActionEvent) = Guide.open(project)
@@ -153,6 +140,7 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
         fun selected() = toolWindow.contentManager.selectedContent?.component
         fun isMemory() = selected() === memory || selected() === usage
         toolWindow.setTitleActions(listOf(
+            newSession,
             object : AnAction("Clear Finished", null, AllIcons.Actions.GC), DumbAware {
                 override fun update(e: AnActionEvent) { e.presentation.isVisible = !isMemory() }
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
@@ -180,7 +168,11 @@ object Layout {
         set(v) = com.intellij.ide.util.PropertiesComponent.getInstance().setValue(PIN, v, true)
 }
 
-private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
+/**
+ * Karten-Liste des Commands-Reiters. [compact]: nur wartende Übergaben (Befehle, Fragen, Reviews, Bilder), ohne Leerzustand,
+ * Hinweise und Claude-Nachrichten - für den Session-Reiter, damit man dort antworten kann, ohne ins Handoff-Fenster zu wechseln.
+ */
+internal class HandoffPanel(private val project: Project, private val compact: Boolean = false) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
     private val service = HandoffService.getInstance(project)
     // Folgt der Breite des Fensters, damit Karten (und die Bildreihen darin) umbrechen statt rechts abgeschnitten zu werden.
     private val list = object : JPanel(), Scrollable {
@@ -201,25 +193,40 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
     private val scroll = JBScrollPane(list).apply { border = JBUI.Borders.empty() }
 
     init {
-        add(scroll, BorderLayout.CENTER)
-        add(pinned, BorderLayout.SOUTH)
+        // Kompakt steht die Liste im Verlauf des Session-Reiters, der selbst scrollt.
+        if (compact) { isOpaque = false; list.isOpaque = false; list.border = JBUI.Borders.empty(4, 0); add(list, BorderLayout.CENTER) }
+        else { add(scroll, BorderLayout.CENTER); add(pinned, BorderLayout.SOUTH) }
         // Nicht in Screenshot-Läufen: Dort gilt die Sandbox als "gerade aktualisiert".
-        if (System.getProperty("handoff.screenshots") == null) Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
+        if (!compact && System.getProperty("handoff.screenshots") == null) Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
         service.addListener({ rebuild() }, this)
         rebuild()
     }
 
+    private fun rebuildCompact() {
+        list.removeAll()
+        val pending = service.proposals.filter { it.isPending }.sortedBy { it.createdAt }
+        pending.forEach { list.add(card(it)); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
+        isVisible = pending.isNotEmpty()
+        list.revalidate(); list.repaint()
+        revalidate(); parent?.revalidate()
+        val newest = pending.maxOfOrNull { it.createdAt } ?: 0L
+        if (newest > lastNewest) SwingUtilities.invokeLater { scrollRectToVisible(Rectangle(0, height - 1, 1, 1)) }
+        lastNewest = newest
+    }
+
     private fun rebuild() {
+        if (compact) return rebuildCompact()
         list.removeAll()
         val notes = NotesService.getInstance(project).all()
         val waiting = project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty()
+        val working = project.getServiceIfCreated(WaitingSessions::class.java)?.working.orEmpty()
         val pin = Layout.pinClaudeMessages
         val top = Layout.newestOnTop
-        if (service.proposals.isEmpty() && notes.isEmpty() && (waiting.isEmpty() || pin)) list.add(emptyState())
+        if (service.proposals.isEmpty() && notes.isEmpty() && ((waiting.isEmpty() && working.isEmpty()) || pin)) list.add(emptyState())
         // Chronologisch, Richtung nach Einstellung (Standard: älteste oben, neueste unten wie in einem Chat).
         val items: List<Pair<Long, () -> JPanel>> =
             // Die Liste ist neueste zuerst; umgedreht bleibt die Reihenfolge bei gleicher Millisekunde richtig (stabile Sortierung).
-            service.proposals.reversed().map { p -> p.createdAt to { card(p) } } + if (pin) emptyList() else waiting.map { w -> w.at to { waitingCard(w) } }
+            service.proposals.reversed().map { p -> p.createdAt to { card(p) } } + if (pin) emptyList() else waiting.map { w -> w.at to { waitingCard(w) } } + working.map { w -> w.since to { workingCard(w) } }
         val sorted = items.sortedBy { it.first }.let { if (top) it.reversed() else it }
         // Notizen ohne wartende Prüfung: eigene Karte, bis Claude sie abholt. Sonst stehen sie in der Prüfkarte.
         val notesCard = if (notes.isNotEmpty() && service.proposals.none { it.review && it.isPending }) notesCard(notes) else null
@@ -234,9 +241,10 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         list.repaint()
 
         pinned.removeAll()
-        if (pin) waiting.sortedBy { it.at }.let { if (top) it.reversed() else it }.forEach {
-            pinned.add(waitingCard(it)); pinned.add(Box.createVerticalStrut(JBUI.scale(8)))
-        }
+        if (pin) (waiting.map { it.at to { waitingCard(it) } } + working.map { it.since to { workingCard(it) } })
+            .sortedBy { it.first }.let { if (top) it.reversed() else it }.forEach { (_, make) ->
+                pinned.add(make()); pinned.add(Box.createVerticalStrut(JBUI.scale(8)))
+            }
         pinned.isVisible = pinned.componentCount > 0
         pinned.revalidate(); pinned.repaint()
 
@@ -479,6 +487,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
             if (preview.isNotEmpty()) add(markdown(preview))
             // Die ganze Nachricht in einem Editor-Reiter: breiter, von oben nach unten lesbar, Markdown gerendert.
             if (cut) add(link("Open Full Message") { Md.openMessage(project, time.format(Date(s.at)), s.text) })
+            add(link("Open in Editor") { SessionEditors.open(project, sessions.infos[s.id]?.tab, s.id) })
             val base = project.basePath.orEmpty().trimEnd('/')
             if (s.cwd != base) add(grey(s.cwd.removePrefix("$base/")))
         }, BorderLayout.CENTER)
@@ -488,7 +497,7 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
                 isOpaque = false
                 add(grey("Sent to Claude…"), BorderLayout.WEST)
             }, BorderLayout.SOUTH)
-        } else if (s.listening) {
+        } else if (s.listening || sessions.canSendKeys(s.id)) {
             // Weiterer Prompt: Enter schickt ab, Umschalt+Enter macht eine neue Zeile.
             val input = JBTextArea(sessions.drafts[s.id].orEmpty(), 2, 0).apply {
                 lineWrap = true; wrapStyleWord = true; font = UIUtil.getLabelFont()
@@ -500,12 +509,12 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
             }
             val send = JButton("Send").apply {
                 putClientProperty("JButton.buttonType", "default")
-                addActionListener { sessions.reply(s, input.text) }
+                addActionListener { send(s, input) }
             }
             input.inputMap.put(javax.swing.KeyStroke.getKeyStroke("ENTER"), "handoff.send")
             input.inputMap.put(javax.swing.KeyStroke.getKeyStroke("shift ENTER"), "insert-break")
             input.actionMap.put("handoff.send", object : javax.swing.AbstractAction() {
-                override fun actionPerformed(e: java.awt.event.ActionEvent) { sessions.reply(s, input.text) }
+                override fun actionPerformed(e: java.awt.event.ActionEvent) { send(s, input) }
             })
             card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
                 isOpaque = false
@@ -518,6 +527,43 @@ private class HandoffPanel(private val project: Project) : JPanel(BorderLayout()
         } else {
             card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply { isOpaque = false; add(dismiss) }, BorderLayout.SOUTH)
         }
+        return card
+    }
+
+    /** Prompt aus einer Karte an die Session; Slash-Befehle gehen nur über ein von Handoff gestartetes Terminal. */
+    private fun send(s: WaitingSession, input: JBTextArea) {
+        val sessions = WaitingSessions.getInstance(project)
+        val text = input.text.trim()
+        if (text.startsWith("/") && !sessions.canSendKeys(s.id)) {
+            com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(
+                "Slash commands only reach sessions started with <b>New Claude Session</b>. Type it in the terminal.",
+                com.intellij.openapi.ui.MessageType.WARNING, null
+            ).setFadeoutTime(5000).createBalloon().show(com.intellij.ui.awt.RelativePoint.getNorthWestOf(input), com.intellij.openapi.ui.popup.Balloon.Position.above)
+            return
+        }
+        sessions.reply(s.id, text)
+    }
+
+    /** Claude arbeitet an einer Session (Prompt abgeschickt, noch nicht fertig). Bewusst ohne Live-Fortschritt - der steht im Editor-Reiter. */
+    private fun workingCard(w: WorkingSession): JPanel {
+        val sessions = WaitingSessions.getInstance(project)
+        val accent = JBColor(0x5A9E6F, 0x6FBF85)
+        val card = cardPanel(accent)
+        card.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(JBLabel("Claude is working…").apply { foreground = accent }, BorderLayout.WEST)
+            add(JBLabel("since " + time.format(Date(w.since))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+        card.add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            Md.preview(w.prompt.removePrefix("The user sent this follow-up prompt from the IDE (Handoff tool window):").trim(), maxLines = 2, maxChars = 160)
+                .first.takeIf { it.isNotEmpty() }?.let { add(grey(Md.plain(it))) }
+            add(link("Open in Editor") { SessionEditors.open(project, sessions.infos[w.id]?.tab, w.id) })
+        }, BorderLayout.CENTER)
+        card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+            isOpaque = false
+            add(JButton("Dismiss").apply { toolTipText = "Hide this card; Claude keeps working"; addActionListener { sessions.dismiss(w) } })
+        }, BorderLayout.SOUTH)
         return card
     }
 

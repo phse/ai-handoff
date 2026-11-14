@@ -49,6 +49,11 @@ dependencies {
         bundledPlugin("com.intellij.mcpServer")
         // ShowDiffAction (Diff der Aufgaben-Changelist) liegt im Modul der VCS-Implementierung.
         bundledModule("intellij.platform.vcs.impl")
+        // Claude-Sessions im Terminal der IDE starten und ihnen Eingaben schicken (neues Terminal, Modul frontend).
+        bundledPlugin("org.jetbrains.plugins.terminal")
+        bundledModule("intellij.terminal.frontend")
+        // Ab 2026.3 liegt die VCS-API im eigenen Plugin - nur beim Bauen gegen eine lokale 2026.3 nötig (2026.2 hat es nicht).
+        if (platformLocalPath != null && file("$platformLocalPath/Contents/plugins/platform-vcs-plugin").isDirectory) bundledPlugin("com.intellij.platform.vcs")
     }
 }
 
@@ -64,6 +69,27 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.3.0</h3>
+            <ul>
+              <li><b>Claude sessions in editor tabs</b>: <i>New Claude Session</i> (also in ⌘N / File | New) starts Claude Code in a terminal tab in the
+                  background and shows the session in an editor tab, the conversation formatted, a prompt field at the bottom.</li>
+              <li>Prompts go to the terminal as if typed, so slash commands like <code>/clear</code> work; buttons for permission
+                  questions, <i>Interrupt</i> and <i>Show Terminal</i>.</li>
+              <li><code>/show-in-editor</code> in a Claude Code session opens its editor tab; cards have <i>Open in Editor</i>.</li>
+              <li>Plan limits (5 hours, week), model and context use in the session tab's header.</li>
+              <li>Suggestions for slash commands when you type <code>/</code>; a spinner below the last prompt while Claude works.</li>
+              <li>Links in Claude's messages open files (with line), settings pages and IDE actions; plain URLs and paths become
+                  links too, right-click for Reveal in Finder, Open in Terminal and Copy. New sessions are told to link a lot.</li>
+              <li>Drop images onto the prompt field or paste a screenshot; Claude gets the file path. Mark areas with a note right
+                  there, as in the image viewer.</li>
+              <li>Image viewer: drag on a free spot to draw a frame right away (no pen button any more), click a frame to select it.</li>
+              <li>Waiting Handoff cards (commands, questions, reviews) also show at the end of the conversation in the session tab. Session tabs open again after
+                  a restart; <i>Resume in Terminal</i> continues a session that no longer runs.</li>
+              <li>"Claude is working…" card after a prompt, until Claude is done.</li>
+              <li>Editor tabs of Handoff show the Handoff icon. System notifications work again in 2026.3.</li>
+              <li>Note: starting sessions and sending input uses the IDE's terminal API, which JetBrains marks as experimental.
+                  It may change in future IDE versions; Handoff then turns off only this part.</li>
+            </ul>
             <h3>1.2.0</h3>
             <ul>
               <li><b>Questions with options</b> (<code>handoff_ask</code>): Claude asks one or more questions as a card (Back/Next),

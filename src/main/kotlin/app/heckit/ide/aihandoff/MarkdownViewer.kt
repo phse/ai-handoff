@@ -35,7 +35,7 @@ object MarkdownViewerFileType : FileType {
     override fun getName() = "Handoff Viewer"
     override fun getDescription() = "Handoff guide and messages"
     override fun getDefaultExtension() = ""
-    override fun getIcon(): Icon = com.intellij.icons.AllIcons.Actions.Help
+    override fun getIcon(): Icon = HandoffIcons.editor()
     override fun isBinary() = false
     override fun isReadOnly() = true
 }

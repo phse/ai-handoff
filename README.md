@@ -37,6 +37,12 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 - **Update CLAUDE.md**: after an update, pick the Handoff instructions your CLAUDE.md files don't mention yet and send
   them to a waiting Claude Code session (or copy the prompt). The Usage tab lists each Handoff tool with its calls and
   whether CLAUDE.md mentions it.
+- **Claude sessions in editor tabs**: **New Claude Session** (⌘N, **+** in the tool window) starts Claude Code in a terminal
+  tab in the background and shows the session in an editor tab: the conversation formatted, a prompt field that sends to the
+  terminal as typed (slash commands with suggestions included), buttons for permission questions, a spinner while Claude
+  works, clickable links (files, folders, web pages, settings, IDE actions), images by drag and drop or paste with marked
+  areas, Handoff cards and plan limits in the tab, and **Resume** after a restart. `/show-in-editor` opens a running
+  session there. Uses the IDE's terminal API, which JetBrains marks as experimental.
 - **Questions with options**: Claude asks one or more questions as a card (Back/Next), one answer or several
   (`multiSelect`) per question, each option with a short description, plus a field for an own answer.
 - **Handoff Tools**: calls per tool; per tool a switch for the CLAUDE.md instruction (Claude edits the file on request)

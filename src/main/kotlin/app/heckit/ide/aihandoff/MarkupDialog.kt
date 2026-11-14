@@ -105,7 +105,8 @@ class MarkupDialog(
         init {
             layout = null
             isFocusable = true
-            // Ohne Stift: Klick auf einen Rahmen wählt ihn aus; Ziehen verschiebt ihn, an den Eckgriffen ändert es die Größe.
+            // Ziehen auf freier Fläche zeichnet einen Rahmen; Klick auf einen Rahmen wählt ihn aus, an den Eckgriffen ändert Ziehen
+            // die Größe, verschoben wird über das Nummernfeld. Einen Stift-Knopf braucht es dafür nicht mehr.
             val mouse = object : MouseAdapter() {
                 var grab: Point? = null      // Mauspunkt beim Drücken (Bildschirm-Pixel im Bild)
                 var startMark: Mark? = null  // Rahmen beim Drücken
@@ -116,6 +117,8 @@ class MarkupDialog(
                     if (markMode) { dragStart = imagePoint(e.point); dragNow = dragStart; return }
                     if (!editable) return
                     val hit = hitTest(e.point)
+                    // Freie Fläche: gleich einen neuen Rahmen aufziehen (ein Klick ohne Ziehen hebt nur die Auswahl auf).
+                    if (hit == null) { selected = null; grab = null; startMark = null; dragStart = imagePoint(e.point); dragNow = dragStart; repaint(); return }
                     selected = hit?.first
                     handle = hit?.second ?: -1
                     // Verschieben geht über das Nummernfeld; im Rahmen selbst nur auswählen, an den Ecken skalieren.
@@ -127,7 +130,7 @@ class MarkupDialog(
                     if (markMode || !editable) return
                     val hit = hitTest(e.point)
                     cursor = Cursor.getPredefinedCursor(when (hit?.second) {
-                        null -> Cursor.DEFAULT_CURSOR
+                        null -> Cursor.CROSSHAIR_CURSOR
                         -1 -> Cursor.DEFAULT_CURSOR
                         0 -> Cursor.NW_RESIZE_CURSOR; 1 -> Cursor.NE_RESIZE_CURSOR
                         2 -> Cursor.SE_RESIZE_CURSOR; else -> Cursor.SW_RESIZE_CURSOR
@@ -561,7 +564,6 @@ class MarkupDialog(
             add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, JBUI.scale(4), 0)).apply {
                 add(zoomOut); add(zoomIn); add(actual); add(fit)
                 add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8)))
-                if (editable) add(pen)
                 if (paths.size > 1) { add(prev); add(next) }
             }, BorderLayout.EAST)
         }, BorderLayout.NORTH)

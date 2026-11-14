@@ -30,7 +30,7 @@ class FeaturesDialog(private val project: Project, private val features: List<Fe
     private val sendAction = object : AbstractAction("Send to Claude") {
         override fun actionPerformed(e: ActionEvent) {
             val s = target ?: return
-            WaitingSessions.getInstance(project).reply(s, Features.prompt(selected()))
+            WaitingSessions.getInstance(project).reply(s.id, Features.prompt(selected()))
             close(OK_EXIT_CODE)
         }
     }

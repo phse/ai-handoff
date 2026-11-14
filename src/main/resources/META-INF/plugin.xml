@@ -26,6 +26,9 @@
   <li><b>Command sequences</b>: several commands as one card, run all or step by step, stops at the first failure.</li>
   <li><b>Claude is waiting</b> (optional): a card and a notification when a Claude Code session in the project is done or
       needs your input. Read the full message in an editor tab and type your next prompt right into the card.</li>
+  <li><b>Claude sessions in editor tabs</b>: start Claude Code from the IDE and work with it in an editor tab, the
+      conversation formatted, prompts and slash commands sent to the terminal in the background. <code>/show-in-editor</code>
+      opens a running session there.</li>
   <li><b>Questions with options</b>: Claude asks as a card, one answer or several, plus your own answer.</li>
   <li><b>Notifications</b> when something is waiting while the IDE is in the background.</li>
   <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging
@@ -53,6 +56,8 @@
     <depends>com.intellij.modules.vcs</depends>
     <!-- Ab 2026.3 liegt die VCS-API (ChangeListManager) im eigenen Plugin; sonst meldet der Verifier sie als fehlend. -->
     <depends optional="true" config-file="handoff-vcs.xml">com.intellij.platform.vcs</depends>
+    <!-- Claude-Sessions im Terminal der IDE (neues Terminal): starten und Eingaben schicken. -->
+    <depends>org.jetbrains.plugins.terminal</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="app.heckit.ide.aihandoff.ScreenshotTrigger"/>
@@ -61,10 +66,17 @@
         <mcpServer.mcpToolset implementation="app.heckit.ide.aihandoff.HandoffToolset"/>
         <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
         <fileEditorProvider implementation="app.heckit.ide.aihandoff.MarkdownViewerProvider"/>
+        <fileEditorProvider implementation="app.heckit.ide.aihandoff.SessionEditorProvider"/>
+        <editorTabTitleProvider implementation="app.heckit.ide.aihandoff.SessionTabTitleProvider"/>
         <editorFactoryListener implementation="app.heckit.ide.aihandoff.NoteGutterInstaller"/>
         <editor.linePainter implementation="app.heckit.ide.aihandoff.NoteLinePainter"/>
     </extensions>
     <actions>
+        <action id="Handoff.NewClaudeSession" class="app.heckit.ide.aihandoff.NewSessionAction" text="New Claude Session"
+                description="Start Claude Code in a terminal tab in the background and show the session in an editor tab">
+            <!-- ⌘N bzw. File | New, neben "Agent Session". Icon setzt die Aktion selbst (Datei-URL, siehe HandoffIcons). -->
+            <add-to-group group-id="NewGroup" anchor="first"/>
+        </action>
         <action id="Handoff.AddNote" class="app.heckit.ide.aihandoff.AddNoteAction" text="Add Note for Claude…"
                 description="Attach a note for Claude Code to this line; Claude gets it with the next review or on request"
                 icon="AllIcons.General.Balloon">

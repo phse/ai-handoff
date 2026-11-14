@@ -79,7 +79,7 @@ class ToolsDialog(private val project: Project, private val calls: Map<String, I
             Permissions.setDenied(groups.filter { !allowed.getValue(it).isSelected }.flatMap { it.tools }.toSet(), tools.toSet())
             prompt()?.let { p ->
                 val s = target
-                if (s != null) WaitingSessions.getInstance(project).reply(s, p)
+                if (s != null) WaitingSessions.getInstance(project).reply(s.id, p)
                 else CopyPasteManager.getInstance().setContents(StringSelection(p))
             }
             close(OK_EXIT_CODE)

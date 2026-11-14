@@ -25,6 +25,7 @@ class UnloadCleanup : DynamicPluginListener {
         for (project in ProjectManager.getInstance().openProjects) {
             Guide.closeAll(project)
             Md.closeAll(project)
+            SessionEditors.closeAll(project)
             // Randsymbole der Notizen hängen als Highlighter an den Dokumenten der IDE.
             project.getServiceIfCreated(NotesService::class.java)?.clear()
             ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.contentManager?.removeAllContents(true)

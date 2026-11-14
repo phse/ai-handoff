@@ -179,6 +179,9 @@ object ScreenshotMaker {
         edt { tools?.close(1) }
         Thread.sleep(1000)
 
+        // 9: Session im Editor-Reiter - Verlauf, Links, eine Frage als Karte im Gespräch, Feld für den nächsten Prompt
+        sessionScene(project, base, out, tw, frame)
+
         // 5: Änderungen prüfen - Diff mit Zeilennotizen
         val cart = File(base, "src/cart.js")
         cart.writeText(CART_CHANGED)
@@ -219,6 +222,78 @@ object ScreenshotMaker {
         Thread.sleep(1000)
         shot(frame, File(out, "05-review.png"))
         log.warn("Handoff: screenshots written to $out")
+    }
+
+    private fun sessionScene(project: Project, base: File, out: File, tw: com.intellij.openapi.wm.ToolWindow, frame: JFrame) {
+        val id = "handoff-demo-session"
+        val dir = File(System.getProperty("user.home"), ".claude/projects/" + base.absolutePath.replace(Regex("[^A-Za-z0-9]"), "-")).apply { mkdirs() }
+        val transcript = File(dir, "$id.jsonl")
+        fun str(t: String) = com.google.gson.JsonPrimitive(t).toString()
+        fun user(t: String) = """{"type":"user","message":{"role":"user","content":${str(t)}}}"""
+        fun text(t: String) = """{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":${str(t)}}]}}"""
+        fun tool(name: String, key: String, value: String) = """{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"$name","input":{"$key":${str(value)}}}]}}"""
+        transcript.writeText(listOf(
+            user("Add a free shipping threshold to the cart total"),
+            tool("Read", "file_path", "${base.path}/src/cart.js"),
+            tool("Edit", "file_path", "${base.path}/src/cart.js"),
+            tool("Bash", "command", "npm test"),
+            text("Done. Orders from **50 €** now ship for free:\n\n- `src/cart.js:3` holds the threshold `FREE_SHIPPING_FROM`\n" +
+                "- the shipping fee is added only below it\n- all 24 tests pass\n\nThe docs for the rule: https://example.com/docs/shipping"),
+            user("Should the threshold apply before or after the discount?"),
+            tool("mcp__phpstorm__handoff_ask", "title", "Free shipping and discounts"),
+            """{"type":"ai-title","aiTitle":"Free shipping threshold"}""",
+        ).joinToString("\n") + "\n")
+        // Session "fertig", Stop-Hook wartet: Feld für den nächsten Prompt ist frei.
+        val waiting = app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }
+        val hook = com.google.gson.JsonObject().apply {
+            addProperty("session_id", id); addProperty("cwd", base.path); addProperty("transcript_path", transcript.path)
+            addProperty("hook_event_name", "Stop"); addProperty("last_assistant_message", "Asked about the discount.")
+        }.toString()
+        val files = listOf(File(waiting, "$id.info").apply { writeText(hook) }, File(waiting, "$id.json").apply { writeText(hook) },
+            File(waiting, "$id.listen").apply { writeText("0") })
+        val service = HandoffService.getInstance(project)
+        edt {
+            service.proposals.clear()
+            service.proposeAsk("Free shipping and discounts", listOf(app.heckit.ide.aihandoff.AskQuestion(
+                "Should the **50 €** threshold be checked before or after the discount?",
+                listOf(
+                    app.heckit.ide.aihandoff.AskOption("After the discount", "What the customer actually pays counts"),
+                    app.heckit.ide.aihandoff.AskOption("Before the discount", "Discounts never cost free shipping"),
+                ),
+            )))
+            tw.hide()
+            ToolWindowManager.getInstance(project).getToolWindow("Project")?.hide()
+            // Nur der Session-Reiter (die Sandbox öffnet z. B. "What's New").
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).let { m -> m.openFiles.forEach(m::closeFile) }
+            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, app.heckit.ide.aihandoff.SessionFile(null, id, transcript.path, "Free shipping threshold")).navigate(true)
+        }
+        Thread.sleep(4000)
+        // Echte Plan-Limits des Rechners nicht ins Bild.
+        edt {
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).selectedEditor?.component?.let { root ->
+                com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
+                    .filter { it.text.orEmpty().contains("Week") }.forEach { it.text = "5h 12 %  ·  Week 34 %" }
+                // Wie eine Session aus "New Claude Session" (in der Sandbox läuft keine): ohne Resume, Hinweis fürs Terminal.
+                com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.ActionLink::class.java)
+                    .filter { it.text.orEmpty().startsWith("Resume") }.forEach { it.isVisible = false }
+                com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
+                    .filter { it.text.orEmpty().startsWith("Enter sends") }
+                    .forEach { it.text = "Enter sends, Shift+Enter adds a line. Goes to the terminal as if typed, slash commands included." }
+            }
+            // Hinweise der Sandbox (z. B. "Cannot update plugin") nicht ins Bild.
+            com.intellij.notification.NotificationsManager.getNotificationsManager()
+                .getNotificationsOfType(com.intellij.notification.Notification::class.java, project).forEach { it.expire() }
+        }
+        Thread.sleep(500)
+        shot(frame, File(out, "09-session.png"))
+        edt {
+            app.heckit.ide.aihandoff.SessionEditors.closeAll(project)
+            service.proposals.clear(); service.fireChanged()
+            tw.show()
+        }
+        files.forEach { it.delete() }
+        transcript.delete()
+        Thread.sleep(1500)
     }
 
     private val CART_CHANGED = """

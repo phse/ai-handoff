@@ -26,7 +26,7 @@ object Attention {
             }
             val notifications = SystemNotifications.getInstance()
             val withCallback = runCatching {
-                notifications.javaClass.getMethod("notify", String::class.java, String::class.java, String::class.java, Runnable::class.java)
+                SystemNotifications::class.java.getMethod("notify", String::class.java, String::class.java, String::class.java, Runnable::class.java)
             }.getOrNull()
             if (withCallback != null) withCallback.invoke(notifications, "Handoff", title, body, onClick)
             else notifications.notify("Handoff", title, body)
