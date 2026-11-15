@@ -90,7 +90,7 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "02-viewer.png"))
+            ImageIO.write(image, "png", File(out, "03-viewer.png"))
         }
         edt { dialog?.close(1) }
         Thread.sleep(1000)
@@ -103,7 +103,7 @@ object ScreenshotMaker {
             memory.expand("f:" + File(base, "CLAUDE.md").path)
         }
         Thread.sleep(3000)
-        shot(frame, File(out, "03-memory.png"))
+        shot(frame, File(out, "04-memory.png"))
 
         // 4: Usage
         val usage = edt { tw.contentManager.contents[2].component as UsagePanel }
@@ -112,7 +112,7 @@ object ScreenshotMaker {
             usage.refresh()
         }
         Thread.sleep(3000)
-        shot(frame, File(out, "04-usage.png"))
+        shot(frame, File(out, "05-usage.png"))
 
         // 6: Ablauf aus mehreren Befehlen und eine wartende Claude-Session (vor Szene 5, die den Diff öffnet)
         val waitingFile = File(app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }, "handoff-demo.json")
@@ -132,7 +132,7 @@ object ScreenshotMaker {
             tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
         }
         Thread.sleep(4000)
-        shot(frame, File(out, "06-sequence.png"))
+        shot(frame, File(out, "07-sequence.png"))
         waitingFile.delete(); listenFile.delete()
         Thread.sleep(2500)
 
@@ -157,7 +157,7 @@ object ScreenshotMaker {
             tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
         }
         Thread.sleep(2500)
-        shot(frame, File(out, "07-ask.png"))
+        shot(frame, File(out, "08-ask.png"))
 
         // 8: Handoff Tools (Dialog als eigenes Bild)
         var tools: app.heckit.ide.aihandoff.ToolsDialog? = null
@@ -174,7 +174,7 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "08-tools.png"))
+            ImageIO.write(image, "png", File(out, "09-tools.png"))
         }
         edt { tools?.close(1) }
         Thread.sleep(1000)
@@ -220,7 +220,7 @@ object ScreenshotMaker {
                 } ?: log.warn("Handoff: no diff editor for the hover")
         }
         Thread.sleep(1000)
-        shot(frame, File(out, "05-review.png"))
+        shot(frame, File(out, "06-review.png"))
         log.warn("Handoff: screenshots written to $out")
     }
 
@@ -285,7 +285,7 @@ object ScreenshotMaker {
                 .getNotificationsOfType(com.intellij.notification.Notification::class.java, project).forEach { it.expire() }
         }
         Thread.sleep(500)
-        shot(frame, File(out, "09-session.png"))
+        shot(frame, File(out, "02-session.png"))
         edt {
             app.heckit.ide.aihandoff.SessionEditors.closeAll(project)
             service.proposals.clear(); service.fireChanged()
