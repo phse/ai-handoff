@@ -417,6 +417,8 @@ class MarkupDialog(
                         canvas.revalidate(); canvas.repaint()
                     }
                     override fun mouseReleased(e: MouseEvent) { if (from != null) { from = null; start = null; updateOkText() } }
+                    // Doppelklick auf die Notiz: bearbeiten wie mit dem Stift.
+                    override fun mouseClicked(e: MouseEvent) { if (e.clickCount == 2 && !field.isEditable) edit() }
                 }
                 number.cursor = Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR)
                 for (c in listOf(number, field, row)) { c.addMouseListener(drag); c.addMouseMotionListener(drag) }

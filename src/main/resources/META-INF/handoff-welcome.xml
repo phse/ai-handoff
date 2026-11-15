@@ -1,0 +1,22 @@
+<!--
+  Start-Dialog ab 2026.3 (nicht-modaler Welcome-Reiter, Modul intellij.platform.ide.nonModalWelcomeScreen in der
+  PhpStorm-Customization). Die Knöpfe links baut WelcomeScreenLeftPanelActions.fillActionGroup: Gibt es die Gruppe
+  "NonModalWelcomeScreen.LeftTabActions", nimmt es deren Einträge, sonst fest Open, New, Clone, Remote. Die Gruppe
+  definiert sonst niemand - deshalb hier mit denselben Standard-Einträgen plus "New Claude Session".
+-->
+<idea-plugin>
+    <actions>
+        <action id="Handoff.WelcomeNewClaudeSession" class="app.heckit.ide.aihandoff.WelcomeNewSessionAction"
+                text="New Claude Session…" description="Choose a folder and start Claude Code there, the session in an editor tab"/>
+        <action id="Handoff.WelcomeResumeClaudeSession" class="app.heckit.ide.aihandoff.WelcomeResumeSessionAction"
+                text="Resume Claude Session…" description="Choose an earlier Claude Code session from any folder and continue it in an editor tab"/>
+        <group id="NonModalWelcomeScreen.LeftTabActions">
+            <reference ref="WelcomeScreen.OpenDirectoryProject"/>
+            <reference ref="NonModalWelcomeScreen.LeftTabActions.New.Action"/>
+            <reference ref="Vcs.VcsClone"/>
+            <reference ref="NonModalWelcomeScreen.RemoteDevelopmentActions"/>
+            <reference ref="Handoff.WelcomeNewClaudeSession"/>
+            <reference ref="Handoff.WelcomeResumeClaudeSession"/>
+        </group>
+    </actions>
+</idea-plugin>

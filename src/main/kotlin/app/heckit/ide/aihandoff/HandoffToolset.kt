@@ -103,53 +103,9 @@ class HandoffToolset : McpToolset {
         val project = currentCoroutineContext().project
         val p = HandoffService.getInstance(project).find(id) ?: return "Unknown id $id."
         withTimeoutOrNull(timeoutSeconds.coerceIn(1, 50) * 1000L) { p.done.await() }
-        return when (p.state) {
-            Proposal.State.PENDING if p.steps.any { it.exitCode != null } ->
-                "pending: ${p.steps.count { it.exitCode != null }} of ${p.steps.size} steps done, the user has not started the next one yet."
-            Proposal.State.PENDING -> "pending: the user has not acted yet."
-            Proposal.State.RUNNING if p.steps.isNotEmpty() -> {
-                val i = p.steps.indexOfFirst { it.running }
-                "running: step ${i + 1} of ${p.steps.size} is still running." + (p.steps.getOrNull(i)?.let { "\nOutput so far:\n${it.outputTail(20)}" } ?: "")
-            }
-            Proposal.State.RUNNING -> "running: the command is still running.\nOutput so far:\n${p.outputTail(20)}"
-            Proposal.State.DISMISSED -> "dismissed by the user." + (p.note?.let { " Note: $it" } ?: "") +
-                (p.marksText().takeIf { it.isNotEmpty() }?.let { "\n$it" } ?: "") +
-                (if (p.steps.any { it.exitCode != null }) "\nSteps run before:\n" + p.stepsText() else "")
-            Proposal.State.FINISHED if p.steps.isNotEmpty() -> buildString {
-                val failed = p.steps.indexOfFirst { (it.exitCode ?: 0) != 0 }
-                if (failed < 0) append("finished: all ${p.steps.size} steps succeeded.\n")
-                else append("failed at step ${failed + 1} of ${p.steps.size} (exit ${p.steps[failed].exitCode}); the steps after it were not run.\n")
-                append("Commands as actually run (the user may have edited them), exit code and output tail:\n")
-                append(p.stepsText())
-            }
-            Proposal.State.FINISHED if p.review -> buildString {
-                append(if (p.lineNotes == null && p.note == null) "approved by the user: no change requests." else "changes requested by the user.")
-                p.note?.let { append("\nNote: $it") }
-                p.lineNotes?.let { append("\nLine notes (path:line, the note, then the line it is attached to):\n").append(it) }
-            }
-            Proposal.State.FINISHED if p.isAsk -> buildString {
-                append("answered by the user.")
-                p.questions.forEachIndexed { qi, q ->
-                    append("\n\nQuestion ${qi + 1}: ${q.question.lineSequence().first().take(120)}")
-                    val chosen = q.picked.sorted()
-                    if (chosen.isEmpty()) append("\nNo option picked.")
-                    else chosen.forEach { append("\nChosen: ${it + 1}. ${q.options[it].label}") }
-                    q.own.takeIf { it.isNotBlank() }?.let { append("\nOwn answer: $it") }
-                }
-            }
-            Proposal.State.FINISHED if p.images.isNotEmpty() -> buildString {
-                val i = p.chosen ?: 0
-                append(if (p.images.size == 1) "approved by the user." else "the user chose image ${i + 1} of ${p.images.size}: ${p.images[i]}.")
-                p.note?.let { append(" Note: $it") }
-                p.marksText().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
-            }
-            Proposal.State.FINISHED -> buildString {
-                append("finished with exit code ${p.exitCode}.\n")
-                append("Command run: ${p.command}\n")
-                append("Output (tail):\n")
-                append(p.outputTail())
-            }
-        }
+        val text = p.resultText()
+        if (p.state == Proposal.State.FINISHED || p.state == Proposal.State.DISMISSED) p.fetched = true
+        return text
     }
 
     @McpTool

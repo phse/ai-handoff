@@ -34,7 +34,10 @@ object WaitingHook {
     private const val LINK_HINT = "The user reads this session in the Handoff editor tab of their JetBrains IDE, where Markdown links open in the IDE. " +
         "Link as much as possible: files and folders as [name](/absolute/path:line), web pages as plain URLs, settings pages as " +
         "[Plugins](settings:Plugins), IDE actions as [Restart IDE](action:RestartIde) (only action ids you have verified). " +
-        "Right-clicking a link offers Reveal in Finder and Open in Terminal."
+        "Right-clicking a link offers Reveal in Finder and Open in Terminal. " +
+        // 2026-11-15: Ein gerendertes 3D-Bild ging per `open` an Vorschau statt an Handoff.
+        "Show images the user should look at, approve or choose from (renders, screenshots, variants) with the MCP tool " +
+        "handoff_show_images (load it via ToolSearch if deferred), not with open or another app."
 
     /**
      * Ereignis → Argument des Skripts und Filter. Bei Notification nur, was eine Eingabe braucht (idle_prompt deckt Stop schon ab).
@@ -273,9 +276,20 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
     fun canSendKeys(id: String): Boolean = infos[id]?.tab?.let { SessionTerminals.isOpen(project, it) } == true
 
     private fun inProject(cwd: String?): Boolean {
-        val base = project.basePath?.trimEnd('/') ?: return false
         val c = cwd?.trimEnd('/') ?: return false
-        return c == base || c.startsWith("$base/")
+        return dirs().any { c == it || c.startsWith("$it/") }
+    }
+
+    /** Projektordner und die Ordner außerhalb, in denen aus diesem Projekt Sessions gestartet wurden. */
+    fun dirs(): List<String> = listOfNotNull(project.basePath?.trimEnd('/')) + extraDirs()
+
+    private fun extraDirs(): List<String> = com.intellij.ide.util.PropertiesComponent.getInstance(project).getList(DIRS_KEY).orEmpty()
+
+    /** Session in einem Ordner außerhalb des Projekts gestartet: ihre Hook-Daten ab jetzt auch hier zeigen. */
+    fun addDir(dir: String) {
+        val d = dir.trimEnd('/')
+        if (dirs().any { d == it || d.startsWith("$it/") }) return
+        com.intellij.ide.util.PropertiesComponent.getInstance(project).setList(DIRS_KEY, (extraDirs() + d).takeLast(20))
     }
 
     private fun read(f: File) = runCatching { JsonParser.parseString(f.readText()).asJsonObject }.getOrNull()
@@ -360,6 +374,7 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
     }
 
     companion object {
+        private const val DIRS_KEY = "app.heckit.ide.aihandoff.sessionDirs"
         fun getInstance(project: Project): WaitingSessions = project.getService(WaitingSessions::class.java)
     }
 }

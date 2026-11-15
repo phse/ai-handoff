@@ -53,9 +53,11 @@ import javax.swing.event.HyperlinkEvent
  * (auch Slash-Befehle, Rückfragen per Taste); sonst nur als Antwort auf "Claude is done" über den Stop-Hook.
  * Nach `/clear` beginnt im selben Terminal eine neue Session - der Reiter folgt ihr über [tab].
  */
-class SessionFile(val tab: String?, val sessionId: String?, restoredTranscript: String? = null, restoredTitle: String? = null) :
+class SessionFile(val tab: String?, val sessionId: String?, restoredTranscript: String? = null, restoredTitle: String? = null, restoredCwd: String? = null) :
     LightVirtualFile("Claude", SessionFileType, "") {
     init { isWritable = false }
+    /** Arbeitsordner der Session - auch außerhalb des Projekts möglich ("New Claude Session in Folder…"). */
+    @Volatile var cwd: String? = restoredCwd
     /** Titel der Session (von Claude Code vergeben), für den Reiter. */
     @Volatile var title: String? = restoredTitle
     /** Zuletzt bekanntes Protokoll - nach einem IDE-Neustart gibt es die Hook-Daten der Session oft nicht mehr. */
@@ -85,43 +87,86 @@ class SessionEditorProvider : FileEditorProvider, DumbAware {
 
 class SessionTabTitleProvider : EditorTabTitleProvider, DumbAware {
     override fun getEditorTabTitle(project: Project, file: VirtualFile): String? =
-        (file as? SessionFile)?.let { f -> "Claude" + (f.title?.let { " · " + StringUtil.shortenTextWithEllipsis(it, 40, 0) } ?: "") }
+        (file as? SessionFile)?.let { f ->
+            // Ordner außerhalb des Projekts (oder ein Unterordner) gleich im Reiter, damit man die Sessions auseinanderhält.
+            val dir = f.cwd?.trimEnd('/')?.takeIf { it != project.basePath?.trimEnd('/') }?.let { " (" + File(it).name + ")" } ?: ""
+            // Das Handoff-Symbol zeigt schon, dass es eine Claude-Session ist.
+            (f.title?.let { StringUtil.shortenTextWithEllipsis(it, 40, 0) } ?: "New Session") + dir
+        }
+
+    override fun getEditorTabTooltipHtml(project: Project, file: VirtualFile): com.intellij.openapi.util.text.HtmlChunk? =
+        (file as? SessionFile)?.let { f -> com.intellij.openapi.util.text.HtmlChunk.text(SessionEditors.shortPath(f.cwd ?: project.basePath ?: return null)) }
 }
 
 /** Öffnen, Starten und Aufräumen der Session-Reiter. */
 object SessionEditors {
     /** Schon offenen Reiter der Session zeigen, sonst einen neuen öffnen. */
-    fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true) {
+    fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true, cwd: String? = null) {
         val manager = FileEditorManager.getInstance(project)
         val open = manager.openFiles.filterIsInstance<SessionFile>().firstOrNull { f ->
             (tab != null && f.tab == tab) || (sessionId != null && (f.sessionId == sessionId || f.currentSession(project) == sessionId))
         }
-        OpenFileDescriptor(project, open ?: SessionFile(tab, sessionId)).navigate(focus)
+        OpenFileDescriptor(project, open ?: SessionFile(tab, sessionId, restoredCwd = cwd)).navigate(focus)
         if (focus) com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
     }
 
-    /** "New Claude Session": Terminal-Reiter mit `claude` im Hintergrund, die Session im Editor-Reiter. */
-    fun newSession(project: Project) {
+    private val startDirs = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Startordner einer Session: das erste `cwd` in ihrem Protokoll (steht in den ersten Zeilen). */
+    fun startDir(transcript: String): String? = startDirs[transcript] ?: runCatching {
+        File(transcript).bufferedReader().useLines { lines ->
+            lines.take(200).firstNotNullOfOrNull { l ->
+                if (!l.contains("\"cwd\"")) null
+                else runCatching { JsonParser.parseString(l).asJsonObject.get("cwd")?.asString }.getOrNull()
+            }
+        }
+    }.getOrNull()?.trimEnd('/')?.also { startDirs[transcript] = it }
+
+    /** Pfad mit `~` statt Home-Ordner, für Anzeigen. */
+    fun shortPath(path: String): String {
+        val home = System.getProperty("user.home")
+        return if (path == home || path.startsWith("$home/")) "~" + path.removePrefix(home) else path
+    }
+
+    /**
+     * "New Claude Session": Terminal-Reiter mit `claude` im Hintergrund, die Session im Editor-Reiter. [dir]: anderer Ordner
+     * als das Projekt; Sessions dort zeigt dieses Projekt dann auch (Karten, Reiter).
+     */
+    fun newSession(project: Project, dir: String? = null, command: String = "claude"): Boolean {
         if (!SessionTerminals.available) {
             Messages.showErrorDialog(project, "This needs the IDE's new terminal (2026.1 or later).", "New Claude Session")
-            return
+            return false
         }
         if (!WaitingHook.isInstalled()) {
             val msg = "Claude sessions in editor tabs need Handoff's hooks for Claude Code (\"Show When Claude Is Waiting\").\n\n" +
                 "Handoff will create ~/.claude/handoff/hook.sh, add it as a hook in ~/.claude/settings.json (a backup is kept as " +
                 "settings.json.bak-handoff; existing hooks stay) and add the command /show-in-editor to ~/.claude/commands."
-            if (Messages.showOkCancelDialog(project, msg, "New Claude Session", "Set Up and Start", "Cancel", null) != Messages.OK) return
+            if (Messages.showOkCancelDialog(project, msg, "New Claude Session", "Set Up and Start", "Cancel", null) != Messages.OK) return false
             runCatching { WaitingHook.install() }.onFailure {
-                Messages.showErrorDialog(project, it.message ?: it.toString(), "New Claude Session"); return
+                Messages.showErrorDialog(project, it.message ?: it.toString(), "New Claude Session"); return false
             }
         }
-        val tab = SessionTerminals.start(project)
+        val sessions = WaitingSessions.getInstance(project)
+        dir?.let { sessions.addDir(it) }
+        val tab = SessionTerminals.start(project, command, dir)
         if (tab == null) {
             Messages.showErrorDialog(project, "Could not open a terminal tab (see idea.log).", "New Claude Session")
-            return
+            return false
         }
-        WaitingSessions.getInstance(project).start()
-        open(project, tab, null)
+        sessions.start()
+        open(project, tab, null, cwd = dir ?: project.basePath)
+        return true
+    }
+
+    /** Frühere Session fortsetzen ("Resume Claude Session…"): schon offenen Reiter zeigen, sonst `claude --resume` in ihrem Ordner. */
+    fun resumeOld(project: Project, sessionId: String, cwd: String) {
+        val manager = FileEditorManager.getInstance(project)
+        val open = manager.openFiles.filterIsInstance<SessionFile>().firstOrNull { it.currentSession(project) == sessionId }
+        if (open != null && (open.tab == null || SessionTerminals.isOpen(project, open.tab))) {
+            if (open.tab != null) { OpenFileDescriptor(project, open).navigate(true); return }
+            resume(project, open, sessionId); return
+        }
+        newSession(project, cwd.takeIf { it.trimEnd('/') != project.basePath?.trimEnd('/') }, "claude --resume $sessionId")
     }
 
     /**
@@ -140,9 +185,10 @@ object SessionEditors {
 
     /** Laufende Session in neuem Terminal fortsetzen (`claude --resume`); der Reiter folgt dann dem Terminal. */
     fun resume(project: Project, file: SessionFile, sessionId: String) {
-        val tab = SessionTerminals.start(project, "claude --resume $sessionId") ?: return
+        val dir = file.transcript?.let { startDir(it) } ?: file.cwd ?: WaitingSessions.getInstance(project).infos[sessionId]?.cwd
+        val tab = SessionTerminals.start(project, "claude --resume $sessionId", dir) ?: return
         FileEditorManager.getInstance(project).closeFile(file)
-        open(project, tab, null)
+        open(project, tab, null, cwd = dir)
     }
 
     private const val KEY = "app.heckit.ide.aihandoff.sessionTabs"
@@ -154,7 +200,7 @@ object SessionEditors {
         if (project.isDisposed || project.locationHash in closing) return
         val lines = FileEditorManager.getInstance(project).openFiles.filterIsInstance<SessionFile>().mapNotNull { f ->
             val id = f.currentSession(project) ?: return@mapNotNull null
-            listOf(id, f.transcript.orEmpty(), f.title.orEmpty().replace('\t', ' ').replace('\n', ' ')).joinToString("\t")
+            listOf(id, f.transcript.orEmpty(), f.title.orEmpty().replace('\t', ' ').replace('\n', ' '), f.cwd.orEmpty()).joinToString("\t")
         }.distinct()
         com.intellij.ide.util.PropertiesComponent.getInstance(project).setList(KEY, lines.ifEmpty { null })
     }
@@ -172,7 +218,7 @@ object SessionEditors {
                 val parts = line.split('\t')
                 val id = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: continue
                 if (manager.openFiles.any { it is SessionFile && it.currentSession(project) == id }) continue
-                OpenFileDescriptor(project, SessionFile(null, id, parts.getOrNull(1)?.ifBlank { null }, parts.getOrNull(2)?.ifBlank { null })).navigate(false)
+                OpenFileDescriptor(project, SessionFile(null, id, parts.getOrNull(1)?.ifBlank { null }, parts.getOrNull(2)?.ifBlank { null }, parts.getOrNull(3)?.ifBlank { null })).navigate(false)
             }
         }, project.disposed)
     }
@@ -435,7 +481,10 @@ class Transcript(val path: String) {
     }
 
     /** Prompts des Nutzers; Slash-Befehle kommen als `<command-name>`, Ausgaben lokaler Befehle als `<local-command-stdout>`. */
-    private fun userText(text: String): TranscriptEntry? {
+    private fun userText(raw: String): TranscriptEntry? {
+        // Eingefügten Text (Handoff schickt mehrzeilige Prompts als Einfügen) schließt Claude Code in
+        // <pasted_content id="abcd">…</pasted_content id="abcd"> ein - ohne Abzug fiele der Prompt unten als "<…" weg.
+        val text = unwrapPasted(raw)
         if (text.isEmpty()) return null
         Regex("<command-name>(.*?)</command-name>").find(text)?.let { m ->
             val args = Regex("(?s)<command-args>(.*?)</command-args>").find(text)?.groupValues?.get(1)?.trim().orEmpty()
@@ -469,6 +518,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val pending = mutableListOf<String>()
     /** Zahl der Prompts im Protokoll, als der älteste vorgemerkte abgeschickt wurde. */
     private var pendingBase = 0
+    /** Aufgeklappte Gruppen von Werkzeug-Schritten (Index des ersten Schritts im Protokoll). */
+    private val expanded = mutableSetOf<Int>()
 
     private val pane = JEditorPane().apply {
         editorKit = HTMLEditorKitBuilder().withWordWrapViewFactory().build().also { kit ->
@@ -489,6 +540,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
         addHyperlinkListener { e ->
             if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
             val link = e.description ?: e.url?.toString() ?: return@addHyperlinkListener
+            if (link.startsWith(STEPS_LINK)) {
+                link.removePrefix(STEPS_LINK).toIntOrNull()?.let { if (!expanded.remove(it)) expanded += it; renderTranscript(force = false) }
+                return@addHyperlinkListener
+            }
             SessionLinks.open(project, link, baseDir())
         }
         // Rechtsklick auf einen Link: Aktionen je nach Ziel.
@@ -497,7 +552,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             override fun mouseReleased(e: java.awt.event.MouseEvent) = popup(e)
             private fun popup(e: java.awt.event.MouseEvent) {
                 if (!e.isPopupTrigger) return
-                val href = linkAt(e.point) ?: return
+                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) } ?: return
                 com.intellij.openapi.actionSystem.ActionManager.getInstance()
                     .createActionPopupMenu("HandoffSession", SessionLinks.menu(project, href, baseDir())).component.show(this@apply, e.x, e.y)
                 e.consume()
@@ -538,16 +593,29 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val scroll = JBScrollPane(conversation).apply { border = JBUI.Borders.empty() }
 
     private val status = JBLabel()
-    private val header = JPanel(BorderLayout()).apply {
-        border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(6, 12))
-        add(status, BorderLayout.WEST)
+    /** Arbeitsordner der Session; Klick zeigt ihn im Finder bzw. Explorer. */
+    private val dirLink = ActionLink("") { (file.cwd ?: baseDir())?.let { com.intellij.ide.actions.RevealFileAction.openDirectory(File(it)) } }.apply {
+        foreground = UIUtil.getContextHelpForeground()
+        toolTipText = "Working directory of the session - click to reveal"
+        horizontalAlignment = javax.swing.SwingConstants.LEFT
+        // Darf schrumpfen: Bei schmalem Reiter wird der Pfad mit "…" gekürzt, statt unter "Show Terminal" zu liegen.
+        minimumSize = java.awt.Dimension(0, 0)
     }
-    private val headerLinks = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(12), 0)).apply { isOpaque = false }.also { header.add(it, BorderLayout.EAST) }
     /** Plan-Limits (5 Stunden, Woche) und - für diese Session - Modell und Kontext, aus den Daten der Statuszeile. */
     private val limits = JBLabel().apply {
         foreground = UIUtil.getContextHelpForeground()
         horizontalAlignment = javax.swing.SwingConstants.CENTER
-    }.also { header.add(it, BorderLayout.CENTER) }
+        border = JBUI.Borders.emptyLeft(12)
+    }
+    private val headerLinks = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(12), 0)).apply { isOpaque = false }
+    // Links und Status bekommen ihre volle Breite, die Mitte (Pfad, dann Limits) den Rest - BorderLayout.WEST mit Status und
+    // Pfad überlagerte bei schmalem Reiter die Links (2026-11-15).
+    private val header = JPanel(BorderLayout(JBUI.scale(12), 0)).apply {
+        border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(6, 12))
+        add(status, BorderLayout.WEST)
+        add(JPanel(BorderLayout()).apply { isOpaque = false; add(dirLink, BorderLayout.CENTER); add(limits, BorderLayout.EAST) }, BorderLayout.CENTER)
+        add(headerLinks, BorderLayout.EAST)
+    }
     private var limitsReadAt = 0L
 
     private fun updateLimits(id: String?) {
@@ -636,6 +704,24 @@ private class SessionEditor(private val project: Project, private val file: Sess
         putClientProperty("JButton.buttonType", "default")
         addActionListener { val id = sessionId; if (resumable && id != null) SessionEditors.resume(project, file, id) else send() }
     }
+    /** Liste der Slash-Befehle: ausführen oder an der Schreibmarke in den Prompt übernehmen. */
+    private val commands = JButton("/").apply {
+        toolTipText = "Slash commands: run one or insert it at the cursor"
+        addActionListener { SlashPicker.show(project, this, run = ::runCommand, insert = ::insertCommand) }
+    }
+
+    private fun runCommand(cmd: String) {
+        val tab = file.tab ?: return
+        if (terminalOpen && SessionTerminals.send(project, tab, cmd)) input.requestFocusInWindow()
+    }
+
+    private fun insertCommand(cmd: String) {
+        val pos = input.caretPosition.coerceIn(0, input.document.length)
+        val before = if (pos > 0 && !input.document.getText(pos - 1, 1).isBlank()) " " else ""
+        input.document.insertString(pos, "$before$cmd ", null)
+        input.requestFocusInWindow()
+    }
+
     /** Session läuft nicht im Terminal der IDE (z. B. nach einem Neustart): Knopf "Resume" statt "Send". */
     private var resumable = false
     private val hint = JBLabel().apply { foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont() }
@@ -649,7 +735,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
             add(JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
                 isOpaque = false
                 add(JBScrollPane(input).apply { border = JBUI.Borders.customLine(JBColor.border()) }, BorderLayout.CENTER)
-                add(JPanel(BorderLayout()).apply { isOpaque = false; add(send, BorderLayout.SOUTH) }, BorderLayout.EAST)
+                add(JPanel(BorderLayout(0, JBUI.scale(4))).apply {
+                    isOpaque = false
+                    add(commands, BorderLayout.NORTH); add(send, BorderLayout.SOUTH)
+                }, BorderLayout.EAST)
             }, BorderLayout.CENTER)
             add(JPanel(BorderLayout(JBUI.scale(12), 0)).apply {
                 isOpaque = false
@@ -683,7 +772,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
 
     /** Arbeitsordner der Session für relative Pfade, sonst der Projektordner. */
-    private fun baseDir(): String? = sessionId?.let { sessions.infos[it]?.cwd } ?: project.basePath
+    private fun baseDir(): String? = sessionId?.let { sessions.infos[it]?.cwd } ?: file.cwd ?: project.basePath
 
     private fun scrollToEnd() = SwingUtilities.invokeLater { scroll.verticalScrollBar.let { it.value = it.maximum } }
 
@@ -708,12 +797,27 @@ private class SessionEditor(private val project: Project, private val file: Sess
             }
         }
         transcript?.title?.takeIf { it != file.title }?.let { file.title = it; updateTabTitle(); SessionEditors.save(project) }
+        // Ordner, in dem die Session gestartet wurde - die Hooks melden den aktuellen (folgt jedem `cd` von Claude), und
+        // `claude --resume` findet die Session nur im Startordner (2026-11-15: Resume landete im Unterordner).
+        (path?.let { SessionEditors.startDir(it) } ?: info?.cwd?.takeIf { file.cwd == null })
+            ?.takeIf { it != file.cwd }?.let { file.cwd = it; updateTabTitle(); SessionEditors.save(project) }
+        (file.cwd ?: baseDir())?.let { SessionEditors.shortPath(it) }?.takeIf { it != dirLink.text }?.let { dirLink.text = it }
         updateState(id)
         updateLimits(id)
     }
 
     private fun updateTabTitle() = runCatching {
         com.intellij.openapi.fileEditor.ex.FileEditorManagerEx.getInstanceEx(project).updateFilePresentation(file)
+    }
+
+    private fun appendEntry(html: StringBuilder, e: TranscriptEntry) {
+        when (e.kind) {
+            TranscriptEntry.Kind.USER -> html.append("<div class=\"user\">")
+                .append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
+            TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(Md.document(e.text), baseDir()))
+            TranscriptEntry.Kind.TOOL -> html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(e.text)).append("</div>")
+            TranscriptEntry.Kind.NOTE -> html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(e.text)).append("</pre>")
+        }
     }
 
     private fun renderTranscript(force: Boolean) {
@@ -724,18 +828,41 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val html = StringBuilder("<html><body>")
         if (t.entries.size > shown.size) html.append("<p class=\"note\">${t.entries.size - shown.size} earlier entries not shown.</p>")
         if (shown.isEmpty()) html.append("<p class=\"note\">No messages yet.</p>")
-        for (e in shown) when (e.kind) {
-            TranscriptEntry.Kind.USER -> html.append("<div class=\"user\">")
-                .append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
-            TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(Md.document(e.text), baseDir()))
-            TranscriptEntry.Kind.TOOL -> html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(e.text)).append("</div>")
-            TranscriptEntry.Kind.NOTE -> html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(e.text)).append("</pre>")
+        // Aufeinanderfolgende Werkzeug-Schritte eingeklappt: eine Zeile mit Anzahl und letztem Schritt, Klick klappt auf.
+        val offset = t.entries.size - shown.size
+        var i = 0
+        while (i < shown.size) {
+            val e = shown[i]
+            if (e.kind == TranscriptEntry.Kind.TOOL) {
+                var end = i
+                while (end + 1 < shown.size && shown[end + 1].kind == TranscriptEntry.Kind.TOOL) end++
+                val count = end - i + 1
+                if (count >= 2) {
+                    val key = offset + i
+                    val open = key in expanded
+                    html.append("<div class=\"tool\"><a href=\"$STEPS_LINK$key\">${if (open) "▾" else "▸"} $count steps</a>")
+                    if (!open) html.append(" · ").append(StringUtil.escapeXmlEntities(StringUtil.shortenTextWithEllipsis(shown[end].text, 120, 0)))
+                    html.append("</div>")
+                    if (open) for (k in i..end) html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(shown[k].text)).append("</div>")
+                    i = end + 1
+                    continue
+                }
+            }
+            i++
+            appendEntry(html, e)
         }
         // Abgeschickt, aber noch nicht im Protokoll (Claude arbeitet noch und hat ihn nur vorgemerkt): grau zeigen.
         // Claude Code speichert Prompts teils verändert (Bildpfade als [Image #1], eingefügter Text gekürzt) - der Text passt
         // dann nie. Deshalb auch zählen: Jeder neue Prompt im Protokoll seit dem Absenden löst den ältesten vorgemerkten ab.
         val users = t.entries.count { it.kind == TranscriptEntry.Kind.USER }
         if (users > pendingBase && pending.isNotEmpty()) { repeat(minOf(users - pendingBase, pending.size)) { pending.removeAt(0) }; pendingBase = users }
+        // Zusätzlich über den Text: Steht der Prompt schon im Protokoll, ist er nicht mehr vorgemerkt (die Zählung allein
+        // ließ ihn am 2026-11-15 stehen, Ursache nicht belegt).
+        if (pending.isNotEmpty()) {
+            fun norm(s: String) = s.replace(Regex("\\s+"), " ").trim()
+            val recent = t.entries.filter { it.kind == TranscriptEntry.Kind.USER }.takeLast(20).map { norm(it.text) }.toSet()
+            pending.removeAll { norm(it) in recent }
+        }
         // Swing-HTML kennt nur eine Klasse je Element - grau per innerem span.
         for (p in pending) html.append("<div class=\"user\"><span class=\"pending\">").append(StringUtil.escapeXmlEntities(p).replace("\n", "<br>"))
             .append("<br><i>Queued - Claude reads it after its current step and keeps working on the task with it.</i></span></div>")
@@ -813,6 +940,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
         input.isEnabled = canSend
         send.isEnabled = canSend || resumable
+        // Slash-Befehle erreichen nur Sessions im eigenen Terminal.
+        commands.isEnabled = terminal
         send.text = if (!canSend && resumable) "Resume" else "Send"
         input.emptyText.text = when {
             terminal -> "Prompt or /command for Claude"
@@ -848,5 +977,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
     companion object {
         /** Mehr Einträge machen den HTML-Viewer träge; der ganze Verlauf steht im Terminal. */
         private const val MAX_ENTRIES = 300
+        private const val STEPS_LINK = "handoff-steps:"
     }
 }
+
+private val PASTED = Regex("""</?pasted_content id="[0-9a-f]{4}">\n?""")
+
+/** Marker von Claude Code um eingefügten Text entfernen (siehe [Transcript]). */
+fun unwrapPasted(text: String): String = if (text.contains("pasted_content id=\"")) text.replace(PASTED, "").trim() else text

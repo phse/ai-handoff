@@ -104,6 +104,62 @@ class Proposal(
     val done = CompletableDeferred<Unit>()
     val createdAt: Long = System.currentTimeMillis()
 
+    /** Claude hat das Ergebnis per handoff_wait_for_result abgeholt. */
+    @Volatile var fetched = false
+    /** Session, die gerade arbeitete, als Claude die Karte schickte - an sie geht das Ergebnis, wenn niemand wartet. */
+    @Volatile var session: String? = null
+
+    /** Ergebnis für Claude, wie handoff_wait_for_result es liefert. */
+    fun resultText(): String {
+        return when (state) {
+            Proposal.State.PENDING if steps.any { it.exitCode != null } ->
+                "pending: ${steps.count { it.exitCode != null }} of ${steps.size} steps done, the user has not started the next one yet."
+            Proposal.State.PENDING -> "pending: the user has not acted yet."
+            Proposal.State.RUNNING if steps.isNotEmpty() -> {
+                val i = steps.indexOfFirst { it.running }
+                "running: step ${i + 1} of ${steps.size} is still running." + (steps.getOrNull(i)?.let { "\nOutput so far:\n${it.outputTail(20)}" } ?: "")
+            }
+            Proposal.State.RUNNING -> "running: the command is still running.\nOutput so far:\n${outputTail(20)}"
+            Proposal.State.DISMISSED -> "dismissed by the user." + (note?.let { " Note: $it" } ?: "") +
+                (marksText().takeIf { it.isNotEmpty() }?.let { "\n$it" } ?: "") +
+                (if (steps.any { it.exitCode != null }) "\nSteps run before:\n" + stepsText() else "")
+            Proposal.State.FINISHED if steps.isNotEmpty() -> buildString {
+                val failed = steps.indexOfFirst { (it.exitCode ?: 0) != 0 }
+                if (failed < 0) append("finished: all ${steps.size} steps succeeded.\n")
+                else append("failed at step ${failed + 1} of ${steps.size} (exit ${steps[failed].exitCode}); the steps after it were not run.\n")
+                append("Commands as actually run (the user may have edited them), exit code and output tail:\n")
+                append(stepsText())
+            }
+            Proposal.State.FINISHED if review -> buildString {
+                append(if (lineNotes == null && note == null) "approved by the user: no change requests." else "changes requested by the user.")
+                note?.let { append("\nNote: $it") }
+                lineNotes?.let { append("\nLine notes (path:line, the note, then the line it is attached to):\n").append(it) }
+            }
+            Proposal.State.FINISHED if isAsk -> buildString {
+                append("answered by the user.")
+                questions.forEachIndexed { qi, q ->
+                    append("\n\nQuestion ${qi + 1}: ${q.question.lineSequence().first().take(120)}")
+                    val chosen = q.picked.sorted()
+                    if (chosen.isEmpty()) append("\nNo option picked.")
+                    else chosen.forEach { append("\nChosen: ${it + 1}. ${q.options[it].label}") }
+                    q.own.takeIf { it.isNotBlank() }?.let { append("\nOwn answer: $it") }
+                }
+            }
+            Proposal.State.FINISHED if images.isNotEmpty() -> buildString {
+                val i = chosen ?: 0
+                append(if (images.size == 1) "approved by the user." else "the user chose image ${i + 1} of ${images.size}: ${images[i]}.")
+                note?.let { append(" Note: $it") }
+                marksText().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
+            }
+            Proposal.State.FINISHED -> buildString {
+                append("finished with exit code ${exitCode}.\n")
+                append("Command run: ${command}\n")
+                append("Output (tail):\n")
+                append(outputTail())
+            }
+        }
+    }
+
     fun outputTail(maxLines: Int = 60): String {
         val lines = output.toString().trimEnd().lines()
         val tail = lines.takeLast(maxLines)
@@ -132,7 +188,7 @@ class HandoffService(private val project: Project) {
 
     fun propose(command: String, reason: String, workingDir: String, risky: Boolean, interactive: Boolean = false): Proposal {
         val p = Proposal("h${counter.incrementAndGet()}", command, reason, workingDir, risky || looksRisky(command), interactive)
-        proposals.add(0, p)
+        add(p)
         Attention.notify(project, if (p.risky) "Claude proposes a risky command" else "Claude proposes a command", reason.ifBlank { command })
         fireChanged()
         return p
@@ -143,7 +199,7 @@ class HandoffService(private val project: Project) {
             "h${counter.incrementAndGet()}", "", reason, workingDir, risky || commands.any(::looksRisky), interactive,
             steps = commands.map(::Step),
         )
-        proposals.add(0, p)
+        add(p)
         Attention.notify(project, "Claude proposes ${commands.size} commands", reason)
         fireChanged()
         return p
@@ -152,7 +208,7 @@ class HandoffService(private val project: Project) {
     fun proposeImages(paths: List<String>, question: String): Proposal {
         val p = Proposal("h${counter.incrementAndGet()}", "", question, "", false, images = paths)
         if (paths.size == 1) p.selected = 0
-        proposals.add(0, p)
+        add(p)
         Attention.notify(project, if (paths.size == 1) "Claude asks you to review an image" else "Claude asks you to choose an image", question)
         fireChanged()
         return p
@@ -160,7 +216,7 @@ class HandoffService(private val project: Project) {
 
     fun proposeAsk(title: String, questions: List<AskQuestion>): Proposal {
         val p = Proposal("h${counter.incrementAndGet()}", "", title, "", false, questions = questions)
-        proposals.add(0, p)
+        add(p)
         Attention.notify(project, if (questions.size == 1) "Claude asks you a question" else "Claude asks you ${questions.size} questions",
             Md.plain(title.ifBlank { questions.first().question }))
         fireChanged()
@@ -176,7 +232,7 @@ class HandoffService(private val project: Project) {
 
     fun proposeReview(summary: String, changelist: String?): Proposal {
         val p = Proposal("h${counter.incrementAndGet()}", "", summary, "", false, review = true, changelist = changelist)
-        proposals.add(0, p)
+        add(p)
         Attention.notify(project, "Claude asks for a review", summary)
         fireChanged()
         return p
@@ -202,6 +258,25 @@ class HandoffService(private val project: Project) {
         fireChanged()
     }
 
+    /**
+     * Neue Karte. Antwortet der Nutzer, nachdem Claude aufgehört hat zu warten (Runde beendet, Warten abgelaufen), holte
+     * niemand das Ergebnis ab - es ginge verloren (2026-11-15: Markierungen in einem Bild). Dann geht es als Prompt an die
+     * Session, die beim Vorschlag arbeitete (Terminal von Handoff oder wartender Stop-Hook).
+     */
+    private fun add(p: Proposal) {
+        val sessions = WaitingSessions.getInstance(project)
+        p.session = sessions.working.singleOrNull()?.id ?: sessions.working.maxByOrNull { it.since }?.id
+        proposals.add(0, p)
+        p.done.invokeOnCompletion {
+            javax.swing.Timer(DELIVER_AFTER_MS) {
+                val id = p.session ?: return@Timer
+                if (p.fetched || project.isDisposed) return@Timer
+                val text = "Result of ${p.id}, which you handed over earlier through Handoff (you were no longer waiting for it):\n" + p.resultText()
+                if (sessions.reply(id, text)) p.fetched = true
+            }.apply { isRepeats = false; start() }
+        }
+    }
+
     fun find(id: String): Proposal? = proposals.firstOrNull { it.id == id }
 
     fun dismiss(p: Proposal, note: String?) {
@@ -224,6 +299,8 @@ class HandoffService(private val project: Project) {
 
         fun looksRisky(command: String) = RISKY.containsMatchIn(command)
 
+        /** So lange warten, ob Claude das Ergebnis selbst abholt (ein laufendes handoff_wait_for_result kehrt sofort zurück). */
+        private const val DELIVER_AFTER_MS = 4000
         fun getInstance(project: Project): HandoffService = project.getService(HandoffService::class.java)
     }
 }

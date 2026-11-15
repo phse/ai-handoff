@@ -103,6 +103,8 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
         val newSession = com.intellij.openapi.actionSystem.ActionManager.getInstance().getAction("Handoff.NewClaudeSession")
         toolWindow.setAdditionalGearActions(com.intellij.openapi.actionSystem.DefaultActionGroup(
             newSession,
+            com.intellij.openapi.actionSystem.ActionManager.getInstance().getAction("Handoff.NewClaudeSessionInFolder"),
+            com.intellij.openapi.actionSystem.ActionManager.getInstance().getAction("Handoff.ResumeClaudeSession"),
             com.intellij.openapi.actionSystem.Separator.create(),
             object : AnAction("Guide", "Setup, a CLAUDE.md prompt per feature and what's new", AllIcons.Actions.Help), DumbAware {
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
@@ -489,7 +491,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             if (cut) add(link("Open Full Message") { Md.openMessage(project, time.format(Date(s.at)), s.text) })
             add(link("Open in Editor") { SessionEditors.open(project, sessions.infos[s.id]?.tab, s.id) })
             val base = project.basePath.orEmpty().trimEnd('/')
-            if (s.cwd != base) add(grey(s.cwd.removePrefix("$base/")))
+            if (s.cwd != base) add(grey(if (s.cwd.startsWith("$base/")) s.cwd.removePrefix("$base/") else SessionEditors.shortPath(s.cwd)))
         }, BorderLayout.CENTER)
         val dismiss = JButton("Dismiss").apply { addActionListener { sessions.dismiss(s) } }
         if (s.id in sessions.sent) {
@@ -814,7 +816,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
 
     private val thumbs = HashMap<String, Icon?>()
 
-    private fun thumb(path: String): Icon? = thumbs.getOrPut(path) {
+    // Schlüssel mit Änderungszeit und Größe: Claude überschreibt Bilder oft unter gleichem Namen (2026-11-15 alte Vorschau).
+    private fun thumb(path: String): Icon? = thumbs.getOrPut(File(path).let { "$path|${it.lastModified()}|${it.length()}" }) {
         runCatching { ImageIO.read(File(path)) }.getOrNull()?.let { img ->
             val w = JBUI.scale(150)
             val h = (img.height * w.toDouble() / img.width).toInt().coerceAtMost(JBUI.scale(150))

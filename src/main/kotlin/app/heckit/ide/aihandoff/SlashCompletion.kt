@@ -235,3 +235,76 @@ class SlashCompletion(private val project: Project, private val area: JTextCompo
         if (c.name == "resume") later()
     }
 }
+
+/**
+ * Knopf "/" im Session-Reiter: alle Slash-Befehle mit Beschreibung, Tippen filtert. Enter oder Doppelklick führt den Befehl
+ * gleich aus, Tab bzw. "Insert" setzt ihn an der Schreibmarke in den Prompt (z. B. um noch Argumente anzuhängen).
+ */
+object SlashPicker {
+    fun show(project: Project, anchor: javax.swing.JComponent, run: (String) -> Unit, insert: (String) -> Unit) {
+        val all = SlashCommands.all(project)
+        val model = javax.swing.DefaultListModel<SlashCommand>().apply { all.forEach(::addElement) }
+        val list = com.intellij.ui.components.JBList(model).apply {
+            selectionMode = javax.swing.ListSelectionModel.SINGLE_SELECTION
+            selectedIndex = 0
+            cellRenderer = object : ColoredListCellRenderer<SlashCommand>() {
+                override fun customizeCellRenderer(list: JList<out SlashCommand>, value: SlashCommand, index: Int, selected: Boolean, hasFocus: Boolean) {
+                    append("/" + value.name)
+                    if (value.description.isNotBlank()) append("  " + value.description.take(90), SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append("  " + value.source, SimpleTextAttributes.GRAY_SMALL_ATTRIBUTES)
+                }
+            }
+        }
+        val filter = com.intellij.ui.SearchTextField(false)
+        fun refilter() {
+            val q = filter.text.trim().removePrefix("/")
+            model.clear()
+            all.filter { q.isEmpty() || it.name.contains(q, true) || it.description.contains(q, true) }.forEach(model::addElement)
+            if (model.size() > 0) list.selectedIndex = 0
+        }
+        filter.addDocumentListener(object : com.intellij.ui.DocumentAdapter() { override fun textChanged(e: DocumentEvent) = refilter() })
+
+        var popup: com.intellij.openapi.ui.popup.JBPopup? = null
+        fun pick(action: (String) -> Unit) {
+            val c = list.selectedValue ?: return
+            popup?.cancel()
+            action("/" + c.name)
+        }
+        val runButton = javax.swing.JButton("Run").apply { putClientProperty("JButton.buttonType", "default"); addActionListener { pick(run) } }
+        val insertButton = javax.swing.JButton("Insert").apply { toolTipText = "Insert at the cursor in the prompt (Tab)"; addActionListener { pick(insert) } }
+        val panel = javax.swing.JPanel(java.awt.BorderLayout(0, com.intellij.util.ui.JBUI.scale(6))).apply {
+            border = com.intellij.util.ui.JBUI.Borders.empty(8)
+            add(filter, java.awt.BorderLayout.NORTH)
+            add(com.intellij.ui.components.JBScrollPane(list).apply { preferredSize = com.intellij.util.ui.JBUI.size(560, 320) }, java.awt.BorderLayout.CENTER)
+            add(javax.swing.JPanel(java.awt.BorderLayout()).apply {
+                isOpaque = false
+                add(com.intellij.ui.components.JBLabel("Enter runs, Tab inserts at the cursor").apply {
+                    foreground = com.intellij.util.ui.UIUtil.getContextHelpForeground(); font = com.intellij.util.ui.JBUI.Fonts.smallFont()
+                }, java.awt.BorderLayout.WEST)
+                add(javax.swing.JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, com.intellij.util.ui.JBUI.scale(6), 0)).apply {
+                    isOpaque = false; add(insertButton); add(runButton)
+                }, java.awt.BorderLayout.EAST)
+            }, java.awt.BorderLayout.SOUTH)
+        }
+        // Tasten im Suchfeld: ↑/↓ bewegen die Auswahl, Enter führt aus, Tab übernimmt.
+        val field = filter.textEditor
+        field.focusTraversalKeysEnabled = false
+        field.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                when (e.keyCode) {
+                    java.awt.event.KeyEvent.VK_DOWN -> { list.selectedIndex = minOf(list.selectedIndex + 1, model.size() - 1); list.ensureIndexIsVisible(list.selectedIndex); e.consume() }
+                    java.awt.event.KeyEvent.VK_UP -> { list.selectedIndex = maxOf(list.selectedIndex - 1, 0); list.ensureIndexIsVisible(list.selectedIndex); e.consume() }
+                    java.awt.event.KeyEvent.VK_ENTER -> { pick(run); e.consume() }
+                    java.awt.event.KeyEvent.VK_TAB -> { pick(insert); e.consume() }
+                }
+            }
+        })
+        list.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) { if (e.clickCount == 2) pick(run) }
+        })
+        popup = com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createComponentPopupBuilder(panel, field)
+            .setTitle("Slash Commands").setRequestFocus(true).setFocusable(true).setMovable(true).setResizable(true)
+            .createPopup()
+        popup.showUnderneathOf(anchor)
+    }
+}

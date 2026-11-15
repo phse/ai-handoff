@@ -276,6 +276,9 @@ object ScreenshotMaker {
                 // Wie eine Session aus "New Claude Session" (in der Sandbox läuft keine): ohne Resume, Hinweis fürs Terminal.
                 com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.ActionLink::class.java)
                     .filter { it.text.orEmpty().startsWith("Resume") }.forEach { it.isVisible = false }
+                // Knopf "/" wie mit laufendem Terminal (Slash-Befehle).
+                com.intellij.util.ui.UIUtil.findComponentsOfType(root, javax.swing.JButton::class.java)
+                    .filter { it.text == "/" || it.text == "Send" }.forEach { it.isEnabled = true }
                 com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
                     .filter { it.text.orEmpty().startsWith("Enter sends") }
                     .forEach { it.text = "Enter sends, Shift+Enter adds a line. Goes to the terminal as if typed, slash commands included." }

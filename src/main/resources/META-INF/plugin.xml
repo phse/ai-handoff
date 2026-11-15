@@ -58,6 +58,8 @@
     <depends optional="true" config-file="handoff-vcs.xml">com.intellij.platform.vcs</depends>
     <!-- Claude-Sessions im Terminal der IDE (neues Terminal): starten und Eingaben schicken. -->
     <depends>org.jetbrains.plugins.terminal</depends>
+    <!-- Knopf "New Claude Session…" im Start-Dialog von 2026.3 (nur, wo der nicht-modale Welcome-Reiter existiert). -->
+    <depends optional="true" config-file="handoff-welcome.xml">com.intellij.phpstorm.customization</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="app.heckit.ide.aihandoff.ScreenshotTrigger"/>
@@ -76,6 +78,14 @@
                 description="Start Claude Code in a terminal tab in the background and show the session in an editor tab">
             <!-- ⌘N bzw. File | New, neben "Agent Session". Icon setzt die Aktion selbst (Datei-URL, siehe HandoffIcons). -->
             <add-to-group group-id="NewGroup" anchor="first"/>
+        </action>
+        <action id="Handoff.NewClaudeSessionInFolder" class="app.heckit.ide.aihandoff.NewSessionInFolderAction" text="New Claude Session in Folder…"
+                description="Start Claude Code in another folder (outside this project, too) and show the session in an editor tab">
+            <add-to-group group-id="NewGroup" relative-to-action="Handoff.NewClaudeSession" anchor="after"/>
+        </action>
+        <action id="Handoff.ResumeClaudeSession" class="app.heckit.ide.aihandoff.ResumeSessionAction" text="Resume Claude Session…"
+                description="Choose an earlier Claude Code session of this project and continue it in an editor tab">
+            <add-to-group group-id="NewGroup" relative-to-action="Handoff.NewClaudeSessionInFolder" anchor="after"/>
         </action>
         <action id="Handoff.AddNote" class="app.heckit.ide.aihandoff.AddNoteAction" text="Add Note for Claude…"
                 description="Attach a note for Claude Code to this line; Claude gets it with the next review or on request"

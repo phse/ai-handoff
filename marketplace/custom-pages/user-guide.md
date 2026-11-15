@@ -125,6 +125,10 @@ corners to resize, its number to move it).
 
 **Tools:** `handoff_show_images`, `handoff_wait_for_result`.
 
+If you answer a card after Claude stopped waiting for it (its turn ended), Handoff sends the result to the session that
+handed the card over, as a prompt - through the IDE terminal or, when Claude is done, through the waiting hook. This
+works for every card type and needs the hooks from **Show When Claude Is Waiting**.
+
 **Prompt for your CLAUDE.md:**
 
 ```
@@ -196,12 +200,17 @@ is the project folder or below it. Switching the menu item off removes the hooks
 in a terminal tab in the background and opens the session in an editor tab:
 
 - At the top, the conversation from the session's transcript, Claude's messages formatted, tool calls as grey lines.
+  Several tool calls in a row fold into one line ("▸ 12 steps" and the last step); click it to see them all.
+- The tab is named after the session ("New Session" until Claude Code gives it a title). The header shows the
+  session's folder (click to reveal it), the tab's tooltip too.
 - At the bottom, a field for your prompt: **Enter** sends it, **Shift+Enter** adds a line. It goes to the terminal as
   if you had typed it, so slash commands like `/clear` or `/compact` work too. After `/clear` the tab follows the new
   session.
 - `/resume ` (with a space) lists the project's earlier sessions by title and time; pick one to get `/resume <id>`.
 - Type `/` in the prompt field: a list suggests slash commands (built-in ones, your commands and skills, those of your
   plugins). **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes. Only where slash commands reach the session.
+- The **/** button above **Send** lists all slash commands with a short description; type to filter. **Run** (Enter,
+  double-click) sends the command right away, **Insert** (Tab) puts it at the cursor in your prompt.
 - While Claude works, a spinner below the last prompt shows it. A prompt you send meanwhile shows grey as *Queued*:
   Claude reads it after its current step and keeps working on the task with it (it does not stop).
 - The header shows your plan limits (5 hours, week; reset times as tooltip) and, for the session that last updated the
@@ -209,7 +218,8 @@ in a terminal tab in the background and opens the session in an editor tab:
 - Links in Claude's messages open in the IDE: file paths (absolute or relative, with `:line`), also file names in
   code spans like `src/Foo.kt:12`, plain web addresses and existing absolute paths in the text; `settings:<Name>` opens a
   settings page, `action:<ActionId>` runs an IDE action. Right-click a link for **Reveal in Finder**, **Open in
-  Terminal**, **Copy Path** or **Copy Link**. Sessions started from Handoff are told at start to link as much as possible.
+  Terminal**, **Copy Path** or **Copy Link**. Sessions started from Handoff are told at start to link as much as possible and to show images with
+  `handoff_show_images` instead of opening them in another app.
 - Drop image files onto the prompt field, or paste a screenshot (⌘V): the prompt gets the file path, and Claude reads
   the image. Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
   draw frames with a note each, and the prompt gets them as pixel areas with the notes. Opening it again shows the frames
@@ -231,7 +241,17 @@ terminal. The "done", "waiting" and "working" cards have **Open in Editor**.
 This needs the hooks from **Show When Claude Is Waiting** (Handoff offers to set them up) and the IDE's terminal
 (2026.1 or later). Handoff marks its terminal tabs with the environment variable `HANDOFF_TAB`, so it knows which
 session runs where. Starting sessions and sending input use the IDE's terminal API, which JetBrains marks as
-experimental: a future IDE version may change it, and then only this part stops working. Setting up the hooks also adds `~/.claude/commands/show-in-editor.md` (unless you have your own
+experimental: a future IDE version may change it, and then only this part stops working.
+
+**New Claude Session in Folder…** starts a session in a folder you choose, outside the project too. The project
+remembers that folder, so the session's cards and tab show here; the tab title adds the folder name.
+**Resume Claude Session…** lists the earlier sessions of the project and those folders (title or first prompt, date,
+number of prompts, the first prompt as tooltip). Pick one to continue it (`claude --resume`) in its folder in a new
+editor tab; a session already open in a tab just comes to the front. Both are in **⌘N** / **File | New** and the **⋮** menu.
+
+In PhpStorm 2026.3 the welcome tab (no project open) has a **New Claude Session…** button below *Open*, *New* and
+*Clone Repository*: choose a folder, and the session opens in an editor tab. **Resume Claude Session…** there lists the
+latest sessions of all folders and continues the one you pick in its folder. Setting up the hooks also adds `~/.claude/commands/show-in-editor.md` (unless you have your own
 command of that name).
 
 ## Memory tab
@@ -267,6 +287,8 @@ The **⋮** menu of the tool window:
 | Entry | What it does |
 |---|---|
 | **New Claude Session** | Claude Code in a terminal tab in the background, the session in an editor tab (also ⌘N, **+**). |
+| **New Claude Session in Folder…** | The same in a folder you choose, outside the project too. |
+| **Resume Claude Session…** | Pick an earlier session of the project and continue it in an editor tab. |
 | **Guide** | Opens this guide in the IDE. |
 | **Handoff Tools…** | Calls per feature; switch its CLAUDE.md instruction and its permission. |
 | **Update CLAUDE.md Instructions…** | Lets Claude add the instructions your CLAUDE.md is missing. |

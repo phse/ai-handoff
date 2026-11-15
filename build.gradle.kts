@@ -69,6 +69,27 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.4.0</h3>
+            <ul>
+              <li><b>New Claude Session in Folder…</b>: start a session in another folder, outside the project too; its cards and
+                  tab show in this project.</li>
+              <li><b>Resume Claude Session…</b>: pick an earlier session of the project (title or first prompt, date, prompts) and
+                  continue it in an editor tab. Both in ⌘N / File | New and the tool window's ⋮ menu.</li>
+              <li>PhpStorm 2026.3: <i>New Claude Session…</i> and <i>Resume Claude Session…</i> (latest sessions of all folders) as buttons in the new welcome tab.</li>
+              <li>Session tabs show the session's folder in the header (click to reveal) and as tooltip; the tab title is the
+                  session's name ("New Session" until it has one), with the folder if it is not the project.</li>
+              <li><b>/</b> button above <i>Send</i>: all slash commands with a short description; run one right away or insert it
+                  at the cursor in the prompt.</li>
+              <li>Tool calls in a row collapse to one line ("▸ 12 steps · last step"); click to expand.</li>
+              <li>A queued prompt no longer shows twice once Claude has picked it up.</li>
+              <li>Multi-line prompts from the session tab arrive as typed text, without the <code>&lt;pasted_content&gt;</code> markers
+                  Claude Code adds to pasted text (visible in Remote Control); prompts with those markers show in the tab again.</li>
+              <li>Answers Claude no longer waits for (e.g. an image approved with marked areas after Claude finished) go to the
+                  session as a prompt instead of getting lost.</li>
+              <li>Image viewer: double-click a note to edit it.</li>
+              <li>Image cards show the current file when Claude overwrites an image under the same name.</li>
+              <li>Sessions started from Handoff are told to show images through <code>handoff_show_images</code> instead of opening them.</li>
+            </ul>
             <h3>1.3.1</h3>
             <ul>
               <li>New cards no longer pop up the Handoff tool window while a session tab is in front; the card shows in the tab.</li>

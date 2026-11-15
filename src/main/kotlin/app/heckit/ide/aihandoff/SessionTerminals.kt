@@ -27,15 +27,16 @@ object SessionTerminals {
         runCatching { Class.forName("com.intellij.terminal.frontend.toolwindow.TerminalToolWindowTabsManager"); true }.getOrDefault(false)
     }
 
-    /** Neuer Terminal-Reiter mit `claude` im Projektordner; liefert die Kennung des Reiters oder null. */
-    fun start(project: Project, command: String = "claude"): String? = guard("start") { bridge(project).start(command) }
+    /** Neuer Terminal-Reiter mit `claude` in [dir] (sonst im Projektordner); liefert die Kennung des Reiters oder null. */
+    fun start(project: Project, command: String = "claude", dir: String? = null): String? =
+        guard("start") { bridge(project).start(command, dir ?: project.basePath) }
 
     fun isOpen(project: Project, tab: String): Boolean = guard("isOpen") { bridge(project).isOpen(tab) } ?: false
 
     /** Irgendein von Handoff gestarteter Reiter offen (ohne EDT, nur für die Abfragehäufigkeit). */
     fun anyOpen(project: Project): Boolean = available && project.getServiceIfCreated(TerminalBridge::class.java)?.hasTabs() == true
 
-    /** Prompt schicken und abschicken (Enter). Mehrzeilig als Einfügen, damit Claude Code die Zeilen nicht einzeln abschickt. */
+    /** Prompt schicken und abschicken (Enter). Zeilenumbrüche als Esc+Enter, damit Claude Code die Zeilen nicht einzeln abschickt. */
     fun send(project: Project, tab: String, text: String): Boolean = guard("send") { bridge(project).send(tab, text, execute = true) } ?: false
 
     /** Einzelne Tasten ohne Enter, z. B. "1" für eine Auswahl oder Esc. */
@@ -72,10 +73,10 @@ class TerminalBridge(private val project: Project) {
 
     private companion object { const val ENTER_DELAY_MS = 250 }
 
-    fun start(command: String): String {
+    fun start(command: String, dir: String?): String {
         val id = UUID.randomUUID().toString()
         val tab = TerminalToolWindowTabsManager.getInstance(project).createTabBuilder()
-            .workingDirectory(project.basePath)
+            .workingDirectory(dir)
             .envVariables(mapOf("HANDOFF_TAB" to id))
             .tabName("Claude")
             .requestFocus(false)
@@ -114,9 +115,10 @@ class TerminalBridge(private val project: Project) {
     fun send(id: String, text: String, execute: Boolean): Boolean {
         if (!isOpen(id)) return false
         val view = tabs[id]!!.view
-        val builder = view.createSendTextBuilder()
-        if (text.contains('\n')) builder.useBracketedPasteMode()
-        builder.send(text)
+        // Mehrzeilig nicht als Einfügen (bracketed paste): Claude Code schließt Eingefügtes in <pasted_content id="…"> ein, und
+        // Remote Control zeigt die Marker an. Esc+Enter ist der Zeilenumbruch von Claude Code (wie Shift+Enter) - so kommt der
+        // Text als ein getippter Prompt an (2026-11-15 per PTY mit Claude Code 2.1.325 geprüft, auch ohne Pausen).
+        view.createSendTextBuilder().send(text.replace("\r\n", "\n").replace("\n", "\u001b\r"))
         // Enter getrennt und etwas später: Kommt "Text\r" in einem Stück, hält Claude Code es für eingefügten Text und macht
         // aus dem \r einen Zeilenumbruch (Sandbox 2026-11-14, nicht jedes Mal) - der Prompt bliebe ungesendet im Feld stehen.
         if (execute) javax.swing.Timer(ENTER_DELAY_MS) { if (isOpen(id)) view.sendText("\r") }.apply { isRepeats = false; start() }
