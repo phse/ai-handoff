@@ -70,6 +70,7 @@
         <fileEditorProvider implementation="app.heckit.ide.aihandoff.MarkdownViewerProvider"/>
         <fileEditorProvider implementation="app.heckit.ide.aihandoff.SessionEditorProvider"/>
         <editorTabTitleProvider implementation="app.heckit.ide.aihandoff.SessionTabTitleProvider"/>
+        <fileIconProvider implementation="app.heckit.ide.aihandoff.SessionIconProvider" order="first"/>
         <editorFactoryListener implementation="app.heckit.ide.aihandoff.NoteGutterInstaller"/>
         <editor.linePainter implementation="app.heckit.ide.aihandoff.NoteLinePainter"/>
     </extensions>

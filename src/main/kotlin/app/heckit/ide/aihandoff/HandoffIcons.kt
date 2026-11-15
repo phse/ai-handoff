@@ -31,6 +31,13 @@ object HandoffIcons {
 
     private val cache = HashMap<String, Icon?>()
 
+    /** Mikrofon für den Diktier-Knopf im Session-Reiter. */
+    fun mic(on: Boolean = false): Icon {
+        val path = if (on) "/icons/mic_on.svg" else "/icons/mic${if (isDark()) "_dark" else ""}.svg"
+        return synchronized(cache) { cache.getOrPut(path) { url(path)?.let { IconLoader.findIcon(it, false) } } }
+            ?: com.intellij.icons.AllIcons.Actions.Execute
+    }
+
     /** 16-px-Symbol für Editor-Reiter (Session, Anleitung, Nachrichten), passend zum Theme. */
     fun editor(): Icon {
         val path = "/icons/expui/toolwindow/handoff${if (isDark()) "_dark" else ""}.svg"

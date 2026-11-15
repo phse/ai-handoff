@@ -57,6 +57,13 @@ object SessionTerminals {
 
     fun show(project: Project, tab: String) { guard("show") { bridge(project).show(tab) } }
 
+    /**
+     * Vorschlag für den nächsten Prompt, den Claude Code nach einer Antwort grau ins Eingabefeld schreibt (Tab übernimmt ihn
+     * dort). Steht nirgends gespeichert - nur auf dem Bildschirm, in der Zeile hinter "❯". Handoff tippt nie ins Feld des
+     * Terminals, also ist Text dort der Vorschlag (oder etwas, das jemand direkt im Terminal tippt).
+     */
+    fun promptSuggestion(project: Project, tab: String): String? = guard("suggestion") { bridge(project).promptSuggestion(tab) }
+
     private fun <T> guard(what: String, block: () -> T): T? {
         if (!available) return null
         return try { block() } catch (e: LinkageError) { log.warn("Handoff: terminal API not usable ($what)", e); null }
@@ -123,6 +130,17 @@ class TerminalBridge(private val project: Project) {
         // aus dem \r einen Zeilenumbruch (Sandbox 2026-11-14, nicht jedes Mal) - der Prompt bliebe ungesendet im Feld stehen.
         if (execute) javax.swing.Timer(ENTER_DELAY_MS) { if (isOpen(id)) view.sendText("\r") }.apply { isRepeats = false; start() }
         return true
+    }
+
+    fun promptSuggestion(id: String): String? {
+        if (!isOpen(id)) return null
+        val models = tabs[id]!!.view.outputModels
+        for (m in listOf(models.alternative, models.regular)) {
+            val start = maxOf(m.startOffset, m.endOffset.minus(6_000L))
+            val line = m.getText(start, m.endOffset).lines().lastOrNull { it.trimStart().startsWith("❯") } ?: continue
+            return line.trimStart().removePrefix("❯").replace('\u00a0', ' ').trim().trim('│').trim().takeIf { it.isNotEmpty() }
+        }
+        return null
     }
 
     fun shell(dir: String) {

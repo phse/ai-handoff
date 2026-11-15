@@ -104,6 +104,8 @@ class Proposal(
     val done = CompletableDeferred<Unit>()
     val createdAt: Long = System.currentTimeMillis()
 
+    /** Frage von Claude Code selbst (AskUserQuestion), abgefangen vom PreToolUse-Hook: die Session, an die die Antwort geht. */
+    @Volatile var askSession: String? = null
     /** Claude hat das Ergebnis per handoff_wait_for_result abgeholt. */
     @Volatile var fetched = false
     /** Session, die gerade arbeitete, als Claude die Karte schickte - an sie geht das Ergebnis, wenn niemand wartet. */
@@ -214,8 +216,9 @@ class HandoffService(private val project: Project) {
         return p
     }
 
-    fun proposeAsk(title: String, questions: List<AskQuestion>): Proposal {
+    fun proposeAsk(title: String, questions: List<AskQuestion>, askSession: String? = null): Proposal {
         val p = Proposal("h${counter.incrementAndGet()}", "", title, "", false, questions = questions)
+        p.askSession = askSession
         add(p)
         Attention.notify(project, if (questions.size == 1) "Claude asks you a question" else "Claude asks you ${questions.size} questions",
             Md.plain(title.ifBlank { questions.first().question }))
@@ -265,7 +268,8 @@ class HandoffService(private val project: Project) {
      */
     private fun add(p: Proposal) {
         val sessions = WaitingSessions.getInstance(project)
-        p.session = sessions.working.singleOrNull()?.id ?: sessions.working.maxByOrNull { it.since }?.id
+        // Fragen von Claude Code beantwortet der Hook selbst - nichts nachzustellen.
+        if (p.askSession == null) p.session = sessions.working.singleOrNull()?.id ?: sessions.working.maxByOrNull { it.since }?.id
         proposals.add(0, p)
         p.done.invokeOnCompletion {
             javax.swing.Timer(DELIVER_AFTER_MS) {
@@ -278,6 +282,15 @@ class HandoffService(private val project: Project) {
     }
 
     fun find(id: String): Proposal? = proposals.firstOrNull { it.id == id }
+
+    /** Karte ohne Ergebnis entfernen (die Frage wurde anderswo beantwortet, z. B. im Terminal). */
+    fun drop(p: Proposal) {
+        proposals.remove(p)
+        p.state = Proposal.State.DISMISSED
+        p.fetched = true
+        p.done.complete(Unit)
+        fireChanged()
+    }
 
     fun dismiss(p: Proposal, note: String?) {
         p.note = note?.takeIf { it.isNotBlank() }

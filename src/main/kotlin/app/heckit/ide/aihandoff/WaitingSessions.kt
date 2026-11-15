@@ -50,6 +50,8 @@ object WaitingHook {
         Triple("Stop", "listen", null),
         Triple("Notification", "wait", "permission_prompt|elicitation_dialog|agent_needs_input"),
         Triple("UserPromptSubmit", "busy", null),
+        // Fragen von Claude Code (AskUserQuestion) in Sessions im Handoff-Reiter: im Reiter beantworten statt im Terminal.
+        Triple("PreToolUse", "ask", "AskUserQuestion"),
         Triple("SessionEnd", "end", null),
     )
 
@@ -84,11 +86,15 @@ object WaitingHook {
                     add(JsonObject().apply {
                         addProperty("type", "command"); addProperty("command", "$COMMAND $arg")
                         if (arg == "listen") { addProperty("asyncRewake", true); addProperty("timeout", LISTEN_SECONDS) }
+                        if (arg == "ask") addProperty("timeout", ASK_SECONDS)
                     })
                 })
             })
         }
     }
+
+    /** So lange wartet der Frage-Hook auf die Antwort aus dem Reiter; danach fragt Claude Code im Terminal. */
+    private const val ASK_SECONDS = 3600
 
     /** So lange wartet ein Stop-Hook auf eine Antwort aus der IDE (danach bleibt nur das Terminal). */
     private const val LISTEN_SECONDS = 86400
@@ -105,7 +111,7 @@ object WaitingHook {
         |[ -n "${'$'}id" ] || exit 0
         |f="${'$'}dir/${'$'}id"
         |if [ "${'$'}1" = "end" ] || [ "${'$'}1" = "clear" ]; then
-        |  rm -f "${'$'}f.json" "${'$'}f.listen" "${'$'}f.reply" "${'$'}f.busy" "${'$'}f.info" "${'$'}f.tab" "${'$'}f.open"
+        |  rm -f "${'$'}f.json" "${'$'}f.listen" "${'$'}f.reply" "${'$'}f.busy" "${'$'}f.info" "${'$'}f.tab" "${'$'}f.open" "${'$'}f.ask" "${'$'}f.answer"
         |  exit 0
         |fi
         |mkdir -p "${'$'}dir" || exit 0
@@ -115,6 +121,24 @@ object WaitingHook {
         |  start)
         |    # Sessions shown in a Handoff editor tab: tell Claude that links there open in the IDE.
         |    [ -n "${'$'}HANDOFF_TAB" ] && printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"$LINK_HINT"}}'
+        |    exit 0 ;;
+        |  ask)
+        |    # AskUserQuestion: only for sessions shown in a Handoff tab, and only while the IDE is running (it touches .alive).
+        |    # The IDE shows the question as a card and writes the hook output (allow + answers) to .answer; deleting .ask
+        |    # means "answer in the terminal" - then Claude Code shows its own dialog as usual.
+        |    [ -n "${'$'}HANDOFF_TAB" ] || [ -f "${'$'}f.tab" ] || exit 0
+        |    alive() { [ -f "${'$'}dir/.alive" ] && [ ${'$'}(( ${'$'}(date +%s) - ${'$'}(date -r "${'$'}dir/.alive" +%s) )) -lt 15 ]; }
+        |    alive || exit 0
+        |    rm -f "${'$'}f.answer"
+        |    trap 'rm -f "${'$'}f.ask"' EXIT
+        |    printf '%s' "${'$'}input" > "${'$'}f.qtmp" && mv "${'$'}f.qtmp" "${'$'}f.ask"
+        |    end=${'$'}(( ${'$'}(date +%s) + $ASK_SECONDS - 30 ))
+        |    while [ ${'$'}(date +%s) -lt ${'$'}end ]; do
+        |      if [ -f "${'$'}f.answer" ]; then cat "${'$'}f.answer"; rm -f "${'$'}f.answer"; exit 0; fi
+        |      [ -f "${'$'}f.ask" ] || exit 0
+        |      alive || exit 0
+        |      sleep 0.5
+        |    done
         |    exit 0 ;;
         |  busy)
         |    rm -f "${'$'}f.json" "${'$'}f.reply"
@@ -335,6 +359,10 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             WorkingSession(id, f.lastModified(), cwd!!, o.str("prompt").orEmpty())
         }
 
+        // Lebenszeichen für den Frage-Hook: Ohne laufende IDE fragt Claude Code gleich im Terminal.
+        runCatching { File(WaitingHook.waiting, ".alive").let { if (!it.exists()) it.createNewFile(); it.setLastModified(now) } }
+        pollAsks(byName, newInfos)
+
         // `/show-in-editor`: Session im Editor-Reiter zeigen.
         byName.values.filter { it.name.endsWith(".open") }.forEach { f ->
             val id = f.name.removeSuffix(".open")
@@ -371,6 +399,63 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         if (notify && waitingChanged) found.filter { before[it.file.name] != it.at && now - it.at < 60_000 }.forEach {
             Attention.notify(project, if (it.finished) "Claude is done" else "Claude is waiting for you", Md.plain(it.text).ifBlank { project.name })
         }
+    }
+
+    /** Offene Fragen von Claude Code je Session: Karte und die Eingabe des Werkzeugs (für die Antwort). */
+    private val asks = java.util.concurrent.ConcurrentHashMap<String, Pair<Proposal, JsonObject>>()
+
+    private fun pollAsks(byName: Map<String, File>, infos: Map<String, SessionInfo>) {
+        val service = HandoffService.getInstance(project)
+        val open = byName.values.filter { it.name.endsWith(".ask") }.associateBy { it.name.removeSuffix(".ask") }
+        // Weg (im Terminal beantwortet, abgebrochen): Karte entfernen.
+        asks.keys.filter { it !in open }.forEach { id -> asks.remove(id)?.first?.takeIf { it.isPending }?.let(service::drop) }
+        for ((id, f) in open) {
+            if (asks.containsKey(id) || id !in infos) continue
+            val input = read(f)?.getAsJsonObject("tool_input") ?: continue
+            val questions = runCatching {
+                input.getAsJsonArray("questions").map { q ->
+                    val o = q.asJsonObject
+                    val header = o.str("header")?.takeIf { it.isNotBlank() }
+                    AskQuestion(
+                        (header?.let { "**$it** · " } ?: "") + o.str("question").orEmpty(),
+                        o.getAsJsonArray("options").map { op -> op.asJsonObject.let { AskOption(it.str("label").orEmpty(), it.str("description").orEmpty()) } },
+                        o.get("multiSelect")?.asBoolean == true,
+                    )
+                }
+            }.getOrNull()?.takeIf { it.isNotEmpty() } ?: continue
+            val placeholder = Proposal("", "", "", "", false)
+            asks[id] = placeholder to input
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({
+                val p = service.proposeAsk("Claude Code asks", questions, askSession = id)
+                if (asks[id]?.first === placeholder) asks[id] = p to input else { service.drop(p); return@invokeLater }
+                p.done.invokeOnCompletion {
+                    if (p.state == Proposal.State.FINISHED) answerAsk(id, input, p) else if (asks[id]?.first === p) File(WaitingHook.waiting, "$id.ask").delete()
+                    asks.remove(id)
+                }
+                SessionEditors.revealCards(project)
+            }, project.disposed)
+        }
+    }
+
+    /** Antwort für den Hook: Werkzeug freigeben, mit den Antworten in der Eingabe (wie die Agent-SDK es vorsieht). */
+    private fun answerAsk(id: String, input: JsonObject, p: Proposal) {
+        val answers = JsonObject()
+        val raw = input.getAsJsonArray("questions")
+        p.questions.forEachIndexed { i, q ->
+            val text = raw.get(i).asJsonObject.str("question") ?: return@forEachIndexed
+            val picked = q.picked.sorted().map { q.options[it].label } + listOfNotNull(q.own.trim().takeIf { it.isNotEmpty() })
+            answers.addProperty(text, picked.joinToString(", "))
+        }
+        val updated = input.deepCopy().apply { add("answers", answers) }
+        val out = JsonObject().apply {
+            add("hookSpecificOutput", JsonObject().apply {
+                addProperty("hookEventName", "PreToolUse"); addProperty("permissionDecision", "allow")
+                addProperty("permissionDecisionReason", "Answered in the IDE (Handoff)"); add("updatedInput", updated)
+            })
+        }
+        val tmp = File(WaitingHook.waiting, "$id.atmp")
+        tmp.writeText(out.toString())
+        tmp.renameTo(File(WaitingHook.waiting, "$id.answer"))
     }
 
     companion object {

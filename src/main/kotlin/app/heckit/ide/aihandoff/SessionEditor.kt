@@ -4,6 +4,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.ide.BrowserUtil
+import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorPolicy
@@ -56,6 +57,8 @@ import javax.swing.event.HyperlinkEvent
 class SessionFile(val tab: String?, val sessionId: String?, restoredTranscript: String? = null, restoredTitle: String? = null, restoredCwd: String? = null) :
     LightVirtualFile("Claude", SessionFileType, "") {
     init { isWritable = false }
+    /** Claude arbeitet gerade - der Reiter zeigt dann einen Spinner statt des Handoff-Symbols ([SessionIconProvider]). */
+    @Volatile var busy: Boolean = false
     /** Arbeitsordner der Session - auch außerhalb des Projekts möglich ("New Claude Session in Folder…"). */
     @Volatile var cwd: String? = restoredCwd
     /** Titel der Session (von Claude Code vergeben), für den Reiter. */
@@ -83,6 +86,81 @@ class SessionEditorProvider : FileEditorProvider, DumbAware {
     override fun createEditor(project: Project, file: VirtualFile): FileEditor = SessionEditor(project, file as SessionFile)
     override fun getEditorTypeId() = "handoff-session"
     override fun getPolicy() = FileEditorPolicy.HIDE_DEFAULT_EDITOR
+}
+
+/** Symbol des Session-Reiters: Spinner, solange Claude arbeitet, sonst das Handoff-Symbol. */
+class SessionIconProvider : com.intellij.ide.FileIconProvider {
+    override fun getIcon(file: VirtualFile, flags: Int, project: Project?): Icon? =
+        (file as? SessionFile)?.let { if (it.busy) HandoffSpinner.icon else HandoffIcons.editor() }
+}
+
+/**
+ * Eigener Spinner für den Reiter, wie der Umschlag bei Mail View (HkLoading): Die Sprechblase aus dem Handoff-Symbol wird
+ * nachgefahren - gezeichnet, gelöscht, rückwärts gezeichnet, gelöscht. [com.intellij.ui.AnimatedIcon] zeigt die Bilder der
+ * Reihe nach und lässt die Komponente, auf der es liegt (der Reiter), neu zeichnen.
+ */
+object HandoffSpinner {
+    private const val PERIOD = 2200
+    private const val FRAMES = 44
+    private val color = JBColor(0x6C707E, 0xCED0D6)
+
+    /** Blase aus `handoff.svg` (13er-Raster, Ecken r = 1), mittig ins 16er-Raster, ein Strich ab der Spitze. */
+    private val BUBBLE: java.awt.Shape = java.awt.geom.Path2D.Double().apply {
+        moveTo(6.0, 9.0); lineTo(3.0, 11.5); lineTo(3.0, 9.0); lineTo(2.0, 9.0)
+        quadTo(1.0, 9.0, 1.0, 8.0); lineTo(1.0, 2.5); quadTo(1.0, 1.5, 2.0, 1.5); lineTo(11.0, 1.5)
+        quadTo(12.0, 1.5, 12.0, 2.5); lineTo(12.0, 8.0); quadTo(12.0, 9.0, 11.0, 9.0); lineTo(6.0, 9.0)
+    }.let { java.awt.geom.AffineTransform.getTranslateInstance(1.5, 1.8).createTransformedShape(it) }
+
+    private val points: List<java.awt.geom.Point2D.Double> = buildList {
+        val it = java.awt.geom.FlatteningPathIterator(BUBBLE.getPathIterator(null), 0.01)
+        val c = DoubleArray(6)
+        while (!it.isDone) { if (it.currentSegment(c) != java.awt.geom.PathIterator.SEG_CLOSE) add(java.awt.geom.Point2D.Double(c[0], c[1])); it.next() }
+    }
+    private val lengths = DoubleArray(points.size).also { l -> for (i in 1 until points.size) l[i] = l[i - 1] + points[i].distance(points[i - 1]) }
+
+    private fun ease(x: Double) = if (x < 0.5) 4 * x * x * x else 1 - Math.pow(-2 * x + 2, 3.0) / 2
+
+    /** Sichtbarer Teil der Länge (0…1) zur Phase [p]: wie pingPong in Mail View. */
+    private fun part(p: Double): Pair<Double, Double> = when {
+        p < 0.22 -> 0.0 to ease(p / 0.22)
+        p < 0.28 -> 0.0 to 1.0
+        p < 0.50 -> ease((p - 0.28) / 0.22) to 1.0
+        p < 0.72 -> 1 - ease((p - 0.5) / 0.22) to 1.0
+        p < 0.78 -> 0.0 to 1.0
+        else -> 0.0 to 1 - ease((p - 0.78) / 0.22)
+    }
+
+    private fun at(d: Double): java.awt.geom.Point2D.Double {
+        val i = lengths.indexOfFirst { it >= d }.let { if (it < 1) 1 else it }
+        val seg = lengths[i] - lengths[i - 1]
+        val f = if (seg == 0.0) 0.0 else (d - lengths[i - 1]) / seg
+        return java.awt.geom.Point2D.Double(points[i - 1].x + f * (points[i].x - points[i - 1].x), points[i - 1].y + f * (points[i].y - points[i - 1].y))
+    }
+
+    private class Frame(private val phase: Double) : Icon {
+        override fun getIconWidth() = JBUI.scale(16)
+        override fun getIconHeight() = JBUI.scale(16)
+        override fun paintIcon(c: java.awt.Component?, g: java.awt.Graphics, x: Int, y: Int) {
+            val (from, to) = part(phase)
+            if (to - from < 0.002) return
+            val g2 = g.create() as java.awt.Graphics2D
+            try {
+                g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.setRenderingHint(java.awt.RenderingHints.KEY_STROKE_CONTROL, java.awt.RenderingHints.VALUE_STROKE_PURE)
+                g2.translate(x, y); g2.scale(JBUI.scale(16) / 16.0, JBUI.scale(16) / 16.0)
+                g2.color = color
+                g2.stroke = java.awt.BasicStroke(1.2f, java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND)
+                val total = lengths.last(); val a = from * total; val b = to * total
+                val path = java.awt.geom.Path2D.Double()
+                at(a).let { path.moveTo(it.x, it.y) }
+                for (i in points.indices) if (lengths[i] > a && lengths[i] < b) path.lineTo(points[i].x, points[i].y)
+                at(b).let { path.lineTo(it.x, it.y) }
+                g2.draw(path)
+            } finally { g2.dispose() }
+        }
+    }
+
+    val icon: Icon by lazy { com.intellij.ui.AnimatedIcon(PERIOD / FRAMES, *Array<Icon>(FRAMES) { Frame(it / FRAMES.toDouble()) }) }
 }
 
 class SessionTabTitleProvider : EditorTabTitleProvider, DumbAware {
@@ -184,9 +262,11 @@ object SessionEditors {
     }
 
     /** Laufende Session in neuem Terminal fortsetzen (`claude --resume`); der Reiter folgt dann dem Terminal. */
-    fun resume(project: Project, file: SessionFile, sessionId: String) {
+    fun resume(project: Project, file: SessionFile, sessionId: String, prompt: String? = null) {
         val dir = file.transcript?.let { startDir(it) } ?: file.cwd ?: WaitingSessions.getInstance(project).infos[sessionId]?.cwd
-        val tab = SessionTerminals.start(project, "claude --resume $sessionId", dir) ?: return
+        // Ein Prompt geht als Argument mit: `claude --resume <id> "<prompt>"` schickt ihn gleich nach dem Start ab.
+        val arg = prompt?.trim()?.takeIf { it.isNotEmpty() }?.let { " '" + it.replace("'", "'\\''") + "'" }.orEmpty()
+        val tab = SessionTerminals.start(project, "claude --resume $sessionId$arg", dir) ?: return
         FileEditorManager.getInstance(project).closeFile(file)
         open(project, tab, null, cwd = dir)
     }
@@ -595,17 +675,20 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
     private val scroll = JBScrollPane(conversation).apply { border = JBUI.Borders.empty() }
 
-    private val status = JBLabel()
+    // Darf in der Breite schrumpfen, nie in der Höhe: Mindesthöhe 0 ließ BoxLayout die Zeile oben anheften und unten
+    // abschneiden (2026-11-16, Unterlängen fehlten).
+    private val status = object : JBLabel() { override fun getMinimumSize() = java.awt.Dimension(0, preferredSize.height) }
     /** Arbeitsordner der Session; Klick zeigt ihn im Finder bzw. Explorer. */
-    private val dirLink = ActionLink("") { (file.cwd ?: baseDir())?.let { com.intellij.ide.actions.RevealFileAction.openDirectory(File(it)) } }.apply {
+    private val dirLink = object : ActionLink("", { _: java.awt.event.ActionEvent -> (file.cwd ?: baseDir())?.let { com.intellij.ide.actions.RevealFileAction.openDirectory(File(it)) } }) {
+        override fun getMinimumSize() = java.awt.Dimension(0, preferredSize.height)
+    }.apply {
         foreground = UIUtil.getContextHelpForeground()
         toolTipText = "Working directory of the session - click to reveal"
         horizontalAlignment = javax.swing.SwingConstants.LEFT
         // Darf schrumpfen: Bei schmalem Reiter wird der Pfad mit "…" gekürzt, statt unter "Show Terminal" zu liegen.
-        minimumSize = java.awt.Dimension(0, 0)
     }
     /** Plan-Limits (5 Stunden, Woche) und - für diese Session - Modell und Kontext, aus den Daten der Statuszeile. */
-    private val limits = JBLabel().apply {
+    private val limits = object : JBLabel() { override fun getMinimumSize() = java.awt.Dimension(0, preferredSize.height) }.apply {
         foreground = UIUtil.getContextHelpForeground()
         horizontalAlignment = javax.swing.SwingConstants.CENTER
         border = JBUI.Borders.emptyLeft(12)
@@ -615,9 +698,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
     // Pfad überlagerte bei schmalem Reiter die Links (2026-11-15).
     private val header = JPanel(BorderLayout(JBUI.scale(12), 0)).apply {
         border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(6, 12))
-        add(status, BorderLayout.WEST)
-        add(JPanel(BorderLayout()).apply { isOpaque = false; add(dirLink, BorderLayout.CENTER); add(limits, BorderLayout.EAST) }, BorderLayout.CENTER)
-        add(headerLinks, BorderLayout.EAST)
+        // Status, Pfad und Limits teilen sich den Rest und werden mit "…" gekürzt; nur die Links rechts behalten ihre Breite
+        // (2026-11-15: "Claude is working… since" lag bei schmalem Reiter unter "Interrupt (Esc)").
+        add(JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(status); add(Box.createHorizontalStrut(JBUI.scale(12))); add(dirLink); add(Box.createHorizontalGlue()); add(limits)
+        }, BorderLayout.CENTER)
+        // Links senkrecht mittig wie die Texte links (FlowLayout setzt sie sonst oben an).
+        add(JPanel(java.awt.GridBagLayout()).apply { isOpaque = false; add(headerLinks) }, BorderLayout.EAST)
     }
     private var limitsReadAt = 0L
 
@@ -655,10 +744,24 @@ private class SessionEditor(private val project: Project, private val file: Sess
         border = JBUI.Borders.empty(6, 8)
         inputMap.put(KeyStroke.getKeyStroke("ENTER"), "handoff.send")
         inputMap.put(KeyStroke.getKeyStroke("shift ENTER"), "insert-break")
+        // Tab bei leerem Feld übernimmt den Vorschlag von Claude Code (wie im Terminal); die Slash-Liste hängt sich davor.
+        inputMap.put(KeyStroke.getKeyStroke("TAB"), "handoff.suggestion")
+        actionMap.put("handoff.suggestion", object : AbstractAction() {
+            override fun actionPerformed(e: java.awt.event.ActionEvent) {
+                val s = suggestion
+                if (text.isEmpty() && s != null) text = s else transferFocus()
+            }
+        })
         actionMap.put("handoff.send", object : AbstractAction() {
             override fun actionPerformed(e: java.awt.event.ActionEvent) { if (!slash.acceptIfVisible()) send() }
         })
         transferHandler = ImageDropHandler(transferHandler)
+        addFocusListener(object : java.awt.event.FocusAdapter() {
+            override fun focusLost(e: java.awt.event.FocusEvent) { if (dictating && e.oppositeComponent !== dictate) dictating = false }
+        })
+        addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) { if (e.keyCode == java.awt.event.KeyEvent.VK_ESCAPE && dictating) dictating = false }
+        })
         document.addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
             override fun textChanged(e: javax.swing.event.DocumentEvent) { SwingUtilities.invokeLater { updateMarkLink() } }
         })
@@ -705,12 +808,66 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
     private val send = JButton("Send").apply {
         putClientProperty("JButton.buttonType", "default")
-        addActionListener { val id = sessionId; if (resumable && id != null) SessionEditors.resume(project, file, id) else send() }
+        addActionListener { val id = sessionId; if (resumable && id != null) SessionEditors.resume(project, file, id, input.text) else send() }
     }
     /** Liste der Slash-Befehle: ausführen oder an der Schreibmarke in den Prompt übernehmen. */
-    private val commands = JButton("/").apply {
+    private val commands = SmallButton("/").apply {
         toolTipText = "Slash commands: run one or insert it at the cursor"
         addActionListener { SlashPicker.show(project, this, run = ::runCommand, insert = ::insertCommand) }
+    }
+
+    /**
+     * Diktieren (macOS): Feld fokussieren und die Diktierfunktion des Systems starten - dieselbe Aktion wie
+     * "Bearbeiten > Diktat starten" (`startDictation:` an die Responder-Kette). Der Text kommt über die Eingabemethode ins Feld.
+     */
+    private val dictate = SmallButton(null, HandoffIcons.mic()).apply {
+        toolTipText = "Dictate (macOS dictation)"
+        isVisible = com.intellij.openapi.util.SystemInfo.isMac
+        addActionListener { toggleDictation() }
+    }
+
+    /** Diktat läuft (soweit Handoff es weiß: gestartet und Feld noch fokussiert) - Knopf hervorgehoben, Hinweis darunter. */
+    private var dictating = false
+        set(value) {
+            field = value
+            // Nur das Symbol wechselt (rotes, gefülltes Mikrofon) - eine Hintergrundfarbe füllte das Rechteck um den runden Knopf.
+            dictate.icon = HandoffIcons.mic(on = value)
+            dictate.toolTipText = if (value) "Stop dictation" else "Dictate (macOS dictation)"
+            if (value) hint.text = "Dictating - speak now. The microphone of macOS shows at the cursor; click here again or press Esc to stop."
+            else stateKey = null  // Hinweis beim nächsten Durchlauf neu setzen
+            dictate.repaint()
+        }
+
+    /**
+     * Diktieren (macOS): Feld fokussieren und die Diktierfunktion des Systems starten bzw. beenden - dieselbe Aktion wie
+     * "Bearbeiten > Diktat starten" (`startDictation:` an die Responder-Kette; während des Diktats beendet sie es).
+     * Der Text kommt über die Eingabemethode ins Feld.
+     */
+    private fun toggleDictation() {
+        val stop = dictating
+        input.requestFocusInWindow()
+        fun done(handled: Boolean) = SwingUtilities.invokeLater {
+            logger<SessionEditor>().info("Handoff: startDictation handled=$handled (stop=$stop)")
+            if (!handled) { dictating = false; hint.text = "Dictation did not start - switch it on in System Settings > Keyboard > Dictation."; return@invokeLater }
+            dictating = !stop
+        }
+        SwingUtilities.invokeLater {
+            runCatching {
+                // Nicht auf den Hauptthread warten (könnte mit dem EDT verklemmen) - Ergebnis kommt per invokeLater zurück.
+                com.intellij.ui.mac.foundation.Foundation.executeOnMainThread(true, false) {
+                    val ok = runCatching {
+                        val app = com.intellij.ui.mac.foundation.Foundation.invoke("NSApplication", "sharedApplication")
+                        // createSelector liefert je nach IDE-Version Pointer oder Selector - per Reflexion, sonst meldet der
+                        // Verifier die Methode unter 2026.1 als fehlend.
+                        val sel = com.intellij.ui.mac.foundation.Foundation::class.java.getMethod("createSelector", String::class.java)
+                            .invoke(null, "startDictation:")
+                        com.intellij.ui.mac.foundation.Foundation.invoke(app, "sendAction:to:from:", sel,
+                            com.intellij.ui.mac.foundation.ID.NIL, com.intellij.ui.mac.foundation.ID.NIL).toInt() != 0
+                    }.onFailure { logger<SessionEditor>().warn("Handoff: dictation failed", it) }.getOrDefault(false)
+                    done(ok)
+                }
+            }.onFailure { logger<SessionEditor>().warn("Handoff: dictation failed", it); done(false) }
+        }
     }
 
     private fun runCommand(cmd: String) {
@@ -740,7 +897,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 add(JBScrollPane(input).apply { border = JBUI.Borders.customLine(JBColor.border()) }, BorderLayout.CENTER)
                 add(JPanel(BorderLayout(0, JBUI.scale(4))).apply {
                     isOpaque = false
-                    add(commands, BorderLayout.NORTH); add(send, BorderLayout.SOUTH)
+                    // Mikrofon und "/" nebeneinander über Send, zusammen so breit wie Send.
+                    add(JPanel(java.awt.GridLayout(1, 0, JBUI.scale(4), 0)).apply { isOpaque = false; add(dictate); add(commands) }, BorderLayout.NORTH)
+                    add(send, BorderLayout.SOUTH)
                 }, BorderLayout.EAST)
             }, BorderLayout.CENTER)
             add(JPanel(BorderLayout(JBUI.scale(12), 0)).apply {
@@ -772,8 +931,25 @@ private class SessionEditor(private val project: Project, private val file: Sess
     /** Vorschläge für Slash-Befehle - nur, wenn sie die Session erreichen (Terminal). */
     private val slash: SlashCompletion = SlashCompletion(project, input) { terminalOpen }
 
+    /**
+     * Diktat und Eingabemethode zurücksetzen, bevor das Feld geleert wird: Nach einem diktierten und abgeschickten Prompt
+     * nahm das Feld keine Tasten mehr an (2026-11-16) - vermutlich hing die Eingabemethode noch im Diktat.
+     */
+    private fun endDictation() {
+        // Nicht erneut startDictation: schicken - war das Diktat schon von Hand beendet, startete es neu.
+        dictating = false
+        runCatching { input.inputContext?.endComposition() }
+        runCatching { input.enableInputMethods(false); input.enableInputMethods(true) }
+    }
+
     private fun send() {
         val text = input.text.trim().takeIf { it.isNotEmpty() } ?: return
+        endDictation()
+        // Session läuft nicht mehr (z. B. nach einem IDE-Neustart): fortsetzen und den Prompt gleich mitgeben.
+        val id = sessionId
+        if (resumable && id != null && !(file.tab != null && terminalOpen) && !(sessions.canReply(id))) {
+            SessionEditors.resume(project, file, id, text); return
+        }
         val tab = file.tab
         val ok = when {
             tab != null && terminalOpen -> SessionTerminals.send(project, tab, text)
@@ -818,6 +994,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             ?.takeIf { it != file.cwd }?.let { file.cwd = it; updateTabTitle(); SessionEditors.save(project) }
         (file.cwd ?: baseDir())?.let { SessionEditors.shortPath(it) }?.takeIf { it != dirLink.text }?.let { dirLink.text = it }
         updateState(id)
+        updateSuggestion(id)
         updateLimits(id)
     }
 
@@ -912,6 +1089,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         status.text = text
         status.foreground = color
         val isBusy = working != null || wasSent
+        if (file.busy != isBusy) { file.busy = isBusy; updateTabTitle() }
         if (busy.isVisible != isBusy) { busy.isVisible = isBusy; conversation.revalidate(); if (isBusy) scrollToEnd() }
 
         headerLinks.removeAll()
@@ -931,7 +1109,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
             question.add(Box.createVerticalStrut(JBUI.scale(6)))
             question.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                 isOpaque = false; alignmentX = 0f
-                if (tab != null && terminal && waiting.notificationType == "permission_prompt") {
+                // Frage von Claude Code (AskUserQuestion) im Terminal: meldet sich auch als permission_prompt, aber Ja/Nein passt nicht
+                // (Taste 1 hakte nur die erste Option an) - dann nur der Weg ins Terminal (2026-11-15).
+                val asking = transcript?.entries?.lastOrNull()?.let { it.kind == TranscriptEntry.Kind.TOOL && it.text.startsWith("AskUserQuestion") } == true
+                if (tab != null && terminal && waiting.notificationType == "permission_prompt" && !asking) {
                     fun key(label: String, keys: String, tip: String) = JButton(label).apply {
                         toolTipText = tip
                         addActionListener { SessionTerminals.keys(project, tab, keys) }
@@ -953,16 +1134,20 @@ private class SessionEditor(private val project: Project, private val file: Sess
         question.isVisible = question.componentCount > 0
         question.revalidate(); question.repaint()
 
-        input.isEnabled = canSend
+        // Auch, wenn die Session erst fortgesetzt werden muss: Der Prompt geht dann beim Fortsetzen mit (2026-11-15: Feld war
+        // nach einem IDE-Neustart gesperrt, man konnte nur Bilder hineinziehen).
+        input.isEnabled = canSend || resumable
         send.isEnabled = canSend || resumable
         // Slash-Befehle erreichen nur Sessions im eigenen Terminal.
         commands.isEnabled = terminal
+        dictate.isEnabled = canSend
         send.text = if (!canSend && resumable) "Resume" else "Send"
-        input.emptyText.text = when {
+        baseEmptyText = when {
             terminal -> "Prompt or /command for Claude"
             canSend -> "Next prompt for Claude"
             else -> "Claude is not waiting for a prompt"
         }
+        applyEmptyText()
         hint.text = when {
             terminal -> "Enter sends, Shift+Enter adds a line. Goes to the terminal as if typed, slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
@@ -970,6 +1155,23 @@ private class SessionEditor(private val project: Project, private val file: Sess
             id == null && tab == null -> "Session not found."
             else -> "Send when Claude is done, or type in the terminal."
         }
+    }
+
+    /** Vorschlag von Claude Code für den nächsten Prompt (grau im leeren Feld, Tab übernimmt ihn). */
+    private var suggestion: String? = null
+    private var baseEmptyText = ""
+
+    private fun applyEmptyText() {
+        val text = suggestion?.let { "$it   (Tab)" } ?: baseEmptyText
+        if (input.emptyText.text != text) { input.emptyText.text = text; input.repaint() }
+    }
+
+    /** Nur, wenn Claude fertig ist und im eigenen Terminal läuft - dann steht der Vorschlag hinter "❯". */
+    private fun updateSuggestion(id: String?) {
+        val tab = file.tab
+        val done = sessions.waiting(id)?.finished == true && (id == null || id !in sessions.sent)
+        val s = if (tab != null && done && terminalOpen) SessionTerminals.promptSuggestion(project, tab) else null
+        if (s != suggestion) { suggestion = s; applyEmptyText() }
     }
 
     override fun getComponent(): JComponent = root
@@ -1000,3 +1202,12 @@ private val PASTED = Regex("""</?pasted_content id="[0-9a-f]{4}">\n?""")
 
 /** Marker von Claude Code um eingefügten Text entfernen (siehe [Transcript]). */
 fun unwrapPasted(text: String): String = if (text.contains("pasted_content id=\"")) text.replace(PASTED, "").trim() else text
+
+/**
+ * Schmaler Knopf (Mikrofon, "/") neben einem zweiten über Send: Die IDE gibt Knöpfen eine Mindestbreite von gut 70 px.
+ * "JButton.buttonType" = "square" umging sie, verschluckte aber den Text, sobald der Knopf ausgegraut war (2026-11-15).
+ */
+private class SmallButton(text: String?, icon: Icon? = null) : JButton(text, icon) {
+    override fun getPreferredSize(): java.awt.Dimension = super.getPreferredSize().apply { width = JBUI.scale(34) }
+    override fun getMinimumSize(): java.awt.Dimension = preferredSize
+}

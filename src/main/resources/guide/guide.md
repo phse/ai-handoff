@@ -227,6 +227,15 @@ in a terminal tab in the background and opens the session in an editor tab:
 - `/resume ` (with a space) lists the project's earlier sessions by title and time; pick one to get `/resume <id>`.
 - Type `/` in the prompt field: a list suggests slash commands (built-in ones, your commands and skills, those of your
   plugins). **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes. Only where slash commands reach the session.
+- When Claude asks a question with options (Claude Code's own *AskUserQuestion*), it shows as a card at the end of the
+  conversation (and in the Handoff tool window): pick, add your own answer, **Submit** - Claude gets the answer right away.
+  **Answer in Terminal** lets Claude Code show its own dialog in the terminal instead. Works for sessions in a Handoff tab
+  while the IDE runs.
+- After an answer, Claude Code often suggests the next prompt. It shows grey in the empty prompt field; **Tab** takes it,
+  typing anything else replaces it.
+- The editor tab shows a spinner while Claude works and the Handoff icon once it is done - visible even while you
+  work in another tab.
+- On macOS the microphone button above **Send** starts the system dictation into the prompt field.
 - The **/** button above **Send** lists all slash commands with a short description; type to filter. **Run** (Enter,
   double-click) sends the command right away, **Insert** (Tab) puts it at the cursor in your prompt.
 - While Claude works, a spinner below the last prompt shows it. A prompt you send meanwhile shows grey as *Queued*:
@@ -332,6 +341,12 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 ## Version history
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
+
+### 1.5.0
+
+Claude Code's own questions in the session tab, suggested prompts with Tab, dictation, a spinner in the tab.
+
+When Claude asks with options, the question shows as a card in the session tab and the answer goes straight back. The prompt Claude Code suggests shows grey in the empty prompt field (Tab takes it). On macOS a microphone button above Send starts dictation. The tab header no longer overlaps when narrow.
 
 ### 1.4.1
 

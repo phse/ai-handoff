@@ -69,6 +69,19 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.5.0</h3>
+            <ul>
+              <li><b>Claude Code's own questions in the session tab</b>: when Claude asks with options (AskUserQuestion), the question
+                  shows as a card in the tab and the Handoff tool window; your answer goes straight back to Claude.
+                  <i>Answer in Terminal</i> hands it to the terminal dialog instead.</li>
+              <li><b>Suggested prompt</b>: the next prompt Claude Code suggests shows grey in the empty prompt field; Tab takes it.</li>
+              <li><b>Dictation</b> (macOS): microphone button above Send starts the system dictation into the prompt field.</li>
+              <li>The session tab shows a spinner while Claude works (the speech bubble of the Handoff icon being traced), the
+                  Handoff icon when it is done.</li>
+              <li>A session that no longer runs (e.g. after an IDE restart) takes a prompt again: <i>Send</i> resumes it with that prompt.</li>
+              <li>Session tab header no longer overlaps on narrow tabs; the status and path shorten instead.</li>
+              <li>Hooks are updated automatically (new PreToolUse hook for AskUserQuestion).</li>
+            </ul>
             <h3>1.4.1</h3>
             <ul>
               <li>Session tabs and guide tabs follow a theme switch (prompt backgrounds stayed dark after Dark → Light).</li>

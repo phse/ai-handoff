@@ -640,7 +640,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         next.addActionListener { advance() }
         updateNext()
         val back = JButton("Back").apply { isVisible = p.page > 0; addActionListener { p.page--; service.fireChanged() } }
-        val dismiss = JButton("Dismiss").apply { addActionListener { service.dismiss(p, own.text) } }
+        // Frage von Claude Code selbst: ablehnen heißt, sie im Terminal zu beantworten (der Hook gibt sie frei).
+        val dismiss = JButton(if (p.askSession != null) "Answer in Terminal" else "Dismiss").apply { addActionListener { service.dismiss(p, own.text) } }
         card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             isOpaque = false
             add(own, BorderLayout.NORTH)
