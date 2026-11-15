@@ -333,6 +333,10 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
 
+### 1.4.1
+
+Session tabs follow a theme switch.
+
 ### 1.4.0
 
 Sessions in other folders, **Resume Claude Session…**, a **/** button for slash commands, folder and name in the session tab.

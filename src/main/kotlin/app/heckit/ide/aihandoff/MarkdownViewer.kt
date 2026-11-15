@@ -49,8 +49,7 @@ class MarkdownViewerProvider : FileEditorProvider, DumbAware {
 }
 
 private class MarkdownViewer(private val project: Project, private val file: MarkdownViewerFile) : UserDataHolderBase(), FileEditor {
-    private val pane = JEditorPane().apply {
-        editorKit = HTMLEditorKitBuilder().withWordWrapViewFactory().build().also { kit ->
+    private fun styledKit() = HTMLEditorKitBuilder().withWordWrapViewFactory().build().also { kit ->
             val fg = UIUtil.getContextHelpForeground()
             val grey = "#%02x%02x%02x".format(fg.red, fg.green, fg.blue)
             kit.styleSheet.addRule("body { margin: ${JBUI.scale(16)}px ${JBUI.scale(24)}px; }")
@@ -60,6 +59,9 @@ private class MarkdownViewer(private val project: Project, private val file: Mar
             kit.styleSheet.addRule("pre { padding: ${JBUI.scale(8)}px; border: 1px solid $grey; }")
             kit.styleSheet.addRule("td, th { padding: 3px ${JBUI.scale(8)}px 3px 0; text-align: left; vertical-align: top; }")
         }
+
+    private val pane = JEditorPane().apply {
+        editorKit = styledKit()
         isEditable = false
         text = "<html><body>${Md.document(file.markdown)}</body></html>"
         caretPosition = 0
@@ -67,7 +69,19 @@ private class MarkdownViewer(private val project: Project, private val file: Mar
     }
     private val scroll = JBScrollPane(pane).apply { border = JBUI.Borders.empty() }
 
-    init { file.anchor?.let { a -> javax.swing.SwingUtilities.invokeLater { pane.scrollToReference(a) } } }
+    init {
+        file.anchor?.let { a -> javax.swing.SwingUtilities.invokeLater { pane.scrollToReference(a) } }
+        // Theme gewechselt: Grau im CSS neu setzen.
+        com.intellij.openapi.application.ApplicationManager.getApplication().messageBus.connect(this)
+            .subscribe(com.intellij.ide.ui.LafManagerListener.TOPIC, com.intellij.ide.ui.LafManagerListener {
+                javax.swing.SwingUtilities.invokeLater {
+                    val pos = pane.caretPosition
+                    pane.editorKit = styledKit()
+                    pane.text = "<html><body>${Md.document(file.markdown)}</body></html>"
+                    pane.caretPosition = pos.coerceAtMost(pane.document.length)
+                }
+            })
+    }
 
     private fun open(link: String) {
         when {

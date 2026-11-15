@@ -521,8 +521,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
     /** Aufgeklappte Gruppen von Werkzeug-Schritten (Index des ersten Schritts im Protokoll). */
     private val expanded = mutableSetOf<Int>()
 
-    private val pane = JEditorPane().apply {
-        editorKit = HTMLEditorKitBuilder().withWordWrapViewFactory().build().also { kit ->
+    /** Stil mit den Farben des aktuellen Themes - nach einem Wechsel neu gebaut (die Farben stehen als Text im CSS). */
+    private fun styledKit() = HTMLEditorKitBuilder().withWordWrapViewFactory().build().also { kit ->
             val fg = UIUtil.getContextHelpForeground()
             val grey = "#%02x%02x%02x".format(fg.red, fg.green, fg.blue)
             val bg = JBColor.namedColor("EditorTabs.underlinedTabBackground", JBColor(0xEEF2F8, 0x2E3440))
@@ -536,6 +536,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
             kit.styleSheet.addRule(".note { color: $grey; }")
             kit.styleSheet.addRule(".pending { color: $grey; }")
         }
+
+    private val pane = JEditorPane().apply {
+        editorKit = styledKit()
         isEditable = false
         addHyperlinkListener { e ->
             if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
@@ -750,7 +753,19 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private val timer = Timer(700) { refresh() }.apply { start() }
 
-    init { refresh() }
+    init {
+        refresh()
+        // Theme gewechselt: Farben im CSS (Prompt-Hintergrund, Grau) und den Hintergrund des Verlaufs neu setzen (2026-11-15:
+        // nach Dark -> Light blieben die Prompts dunkelblau).
+        com.intellij.openapi.application.ApplicationManager.getApplication().messageBus.connect(this)
+            .subscribe(com.intellij.ide.ui.LafManagerListener.TOPIC, com.intellij.ide.ui.LafManagerListener {
+                SwingUtilities.invokeLater {
+                    pane.editorKit = styledKit()
+                    conversation.background = pane.background
+                    renderTranscript(force = false)
+                }
+            })
+    }
 
     private val sessionId get() = file.currentSession(project)
     private val terminalOpen get() = file.tab?.let { SessionTerminals.isOpen(project, it) } == true

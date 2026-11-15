@@ -69,6 +69,10 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.4.1</h3>
+            <ul>
+              <li>Session tabs and guide tabs follow a theme switch (prompt backgrounds stayed dark after Dark → Light).</li>
+            </ul>
             <h3>1.4.0</h3>
             <ul>
               <li><b>New Claude Session in Folder…</b>: start a session in another folder, outside the project too; its cards and
