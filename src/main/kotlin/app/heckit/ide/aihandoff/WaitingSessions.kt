@@ -43,6 +43,26 @@ object WaitingHook {
         "handoff_show_images (load it via ToolSearch if deferred), not with open or another app."
 
     /**
+     * Regeln für die Karten - nur für Werkzeuge, die nicht per `permissions.deny` gesperrt sind. Stehen sie nur in einer langen
+     * CLAUDE.md, schreibt Claude Befehle doch als Textzeile (2026-11-16, `git push` zweimal); die Werkzeuge sind oft
+     * deferred und fallen beim Antworten ohne Schema nicht ein. Keine Anführungszeichen (steht in JSON in einem printf).
+     */
+    private fun startHint(): String {
+        val denied = runCatching { Permissions.denied() }.getOrDefault(emptySet())
+        fun ok(vararg tools: String) = tools.none { it in denied } && "handoff_wait_for_result" !in denied
+        val parts = mutableListOf(LINK_HINT)
+        if (ok("handoff_propose_command")) parts += "Hand over commands the user should run themselves (push, deploy, release, upload, login, " +
+            "anything outward-facing) as a card with handoff_propose_command" +
+            (if (ok("handoff_propose_sequence")) " - several in a row as one card with handoff_propose_sequence -" else "") +
+            " instead of writing them as a text line or asking whether to run them, and wait for the outcome with handoff_wait_for_result."
+        if (ok("handoff_ask")) parts += "Ask questions with options (which variant, which findings to save) with handoff_ask instead of in the text."
+        if (ok("handoff_request_review")) parts += "When a task with file changes is done, ask the user to review it with handoff_request_review."
+        parts += "These handoff tools are often deferred: load them via ToolSearch (query handoff) before the first call. " +
+            "Put slash commands for the user (e.g. /compact with instructions, skills) on their own line or in backticks: the tab offers them to run or insert."
+        return parts.joinToString(" ")
+    }
+
+    /**
      * Ereignis → Argument des Skripts und Filter. Bei Notification nur, was eine Eingabe braucht (idle_prompt deckt Stop schon ab).
      * Stop läuft als asyncRewake-Hook im Hintergrund: Er legt die Datei ab und wartet auf eine Antwort aus der IDE
      * (`<id>.reply`). Kommt eine, gibt er sie auf stderr aus und endet mit Code 2 - Claude Code weckt die Session dann mit
@@ -102,7 +122,7 @@ object WaitingHook {
     /** So lange wartet ein Stop-Hook auf eine Antwort aus der IDE (danach bleibt nur das Terminal). */
     private const val LISTEN_SECONDS = 86400
 
-    private val SCRIPT = """
+    private val SCRIPT get() = """
         |#!/bin/bash
         |# Handoff for Claude Code: tells the IDE plugin what a Claude Code session is doing.
         |# start/busy/wait/listen keep the hook data of the session, end removes it. "busy" (UserPromptSubmit) marks the
@@ -123,7 +143,7 @@ object WaitingHook {
         |case "${'$'}1" in
         |  start)
         |    # Sessions shown in a Handoff editor tab: tell Claude that links there open in the IDE.
-        |    [ -n "${'$'}HANDOFF_TAB" ] && printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"$LINK_HINT"}}'
+        |    [ -n "${'$'}HANDOFF_TAB" ] && printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"${startHint()}"}}'
         |    exit 0 ;;
         |  ask)
         |    # AskUserQuestion: only for sessions shown in a Handoff tab, and only while the IDE is running (it touches .alive).

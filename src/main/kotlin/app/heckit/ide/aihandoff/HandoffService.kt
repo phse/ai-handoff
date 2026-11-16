@@ -85,6 +85,9 @@ class Proposal(
     val isPending get() = state == State.PENDING
     /** Markierte Bereiche je Bild (Index in [images]). */
     val marks = java.util.concurrent.ConcurrentHashMap<Int, List<Mark>>()
+    /** Zeichnungen je Bild und die gespeicherte Bildkopie damit (Pfad). */
+    val shapes = java.util.concurrent.ConcurrentHashMap<Int, List<Shape>>()
+    val drawn = java.util.concurrent.ConcurrentHashMap<Int, String>()
 
     /** Ergebnis eines Ablaufs für Claude: je Schritt Befehl, Exit-Code und Ende der Ausgabe. */
     fun stepsText(): String = steps.mapIndexed { i, s ->
@@ -96,9 +99,9 @@ class Proposal(
         }
     }.joinToString("\n")
 
-    fun marksText(): String = images.indices.filter { !marks[it].isNullOrEmpty() }.joinToString("\n") { i ->
+    fun marksText(): String = (images.indices.filter { !marks[it].isNullOrEmpty() }.map { i ->
         "Marked areas on image ${i + 1} (${images[i]}), in pixels of the original image:\n" + MarkupDialog.describe(marks[i]!!)
-    }
+    } + images.indices.mapNotNull { i -> drawn[i]?.let { MarkupDialog.describeDrawing(i, images[i], it) } }).joinToString("\n")
     val output = StringBuffer()
     /** Wird bei FINISHED oder DISMISSED abgeschlossen. */
     val done = CompletableDeferred<Unit>()

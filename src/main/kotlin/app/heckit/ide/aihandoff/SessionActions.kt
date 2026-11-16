@@ -111,15 +111,16 @@ object PastSessions {
         var title: String? = null
         var first: String? = null
         var prompts = 0
+        var custom = false
         f.bufferedReader().useLines { lines ->
             for (line in lines) {
                 // Nur Zeilen parsen, die etwas Gesuchtes enthalten - Protokolle werden schnell mehrere MB groß.
-                val isTitle = line.contains("\"ai-title\"")
+                val isTitle = line.contains("\"ai-title\"") || line.contains("\"custom-title\"")
                 val isUser = line.contains("\"type\":\"user\"")
                 if (!isTitle && !isUser && cwd != null) continue
                 val o = runCatching { JsonParser.parseString(line).asJsonObject }.getOrNull() ?: continue
                 if (cwd == null) cwd = o.str("cwd")
-                if (isTitle) o.str("aiTitle")?.let { title = it }
+                if (isTitle) o.str("customTitle")?.let { title = it; custom = true } ?: o.str("aiTitle")?.takeIf { !custom }?.let { title = it }
                 if (isUser && o.str("type") == "user" && o.get("isMeta")?.asBoolean != true && o.get("isSidechain")?.asBoolean != true) {
                     val text = promptText(o) ?: continue
                     prompts++

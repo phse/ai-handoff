@@ -39,6 +39,13 @@ object SessionTerminals {
     /** Prompt schicken und abschicken (Enter). Zeilenumbrüche als Esc+Enter, damit Claude Code die Zeilen nicht einzeln abschickt. */
     fun send(project: Project, tab: String, text: String): Boolean = guard("send") { bridge(project).send(tab, text, execute = true) } ?: false
 
+    /**
+     * Wie [send], aber sofort statt nach dem laufenden Schritt (Ctrl+Enter in Claude Code, `chat:sendNow`): Claude bricht den
+     * laufenden Werkzeugaufruf ab und liest den Prompt gleich. Gesendet als Akkord Ctrl+X Ctrl+S, den Claude Code ebenfalls
+     * an `chat:sendNow` bindet - Ctrl+Enter selbst kommt im Terminal nicht eindeutig an (per PTY mit 2.1.325 geprüft, 2026-11-16).
+     */
+    fun sendNow(project: Project, tab: String, text: String): Boolean = guard("sendNow") { bridge(project).send(tab, text, execute = true, enter = "\u0018\u0013") } ?: false
+
     /** Einzelne Tasten ohne Enter, z. B. "1" für eine Auswahl oder Esc. */
     fun keys(project: Project, tab: String, keys: String): Boolean = guard("keys") { bridge(project).send(tab, keys, execute = false) } ?: false
 
@@ -119,7 +126,7 @@ class TerminalBridge(private val project: Project) {
         return false
     }
 
-    fun send(id: String, text: String, execute: Boolean): Boolean {
+    fun send(id: String, text: String, execute: Boolean, enter: String = "\r"): Boolean {
         if (!isOpen(id)) return false
         val view = tabs[id]!!.view
         // Mehrzeilig nicht als Einfügen (bracketed paste): Claude Code schließt Eingefügtes in <pasted_content id="…"> ein, und
@@ -128,7 +135,7 @@ class TerminalBridge(private val project: Project) {
         view.createSendTextBuilder().send(text.replace("\r\n", "\n").replace("\n", "\u001b\r"))
         // Enter getrennt und etwas später: Kommt "Text\r" in einem Stück, hält Claude Code es für eingefügten Text und macht
         // aus dem \r einen Zeilenumbruch (Sandbox 2026-11-14, nicht jedes Mal) - der Prompt bliebe ungesendet im Feld stehen.
-        if (execute) javax.swing.Timer(ENTER_DELAY_MS) { if (isOpen(id)) view.sendText("\r") }.apply { isRepeats = false; start() }
+        if (execute) javax.swing.Timer(ENTER_DELAY_MS) { if (isOpen(id)) view.sendText(enter) }.apply { isRepeats = false; start() }
         return true
     }
 

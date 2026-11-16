@@ -39,6 +39,9 @@ object SlashCommands {
         "review" to "Review a pull request", "mcp" to "Manage MCP servers", "agents" to "Manage subagents",
         "permissions" to "Allow or deny tools", "hooks" to "Manage hooks", "config" to "Open settings", "status" to "Show status",
         "plugin" to "Manage plugins", "export" to "Export the conversation", "help" to "Show help", "exit" to "Quit Claude Code",
+        "rename" to "Rename the session", "add-dir" to "Add a working directory", "doctor" to "Check the installation",
+        "login" to "Sign in", "logout" to "Sign out", "ide" to "Connect to an IDE", "statusline" to "Set up the status line",
+        "release-notes" to "Show release notes", "fast" to "Toggle fast mode", "btw" to "Ask a side question",
     ).map { (n, d) -> SlashCommand(n, d, "built-in") }
 
     @Volatile private var cache: Pair<Long, List<SlashCommand>>? = null
@@ -115,9 +118,11 @@ object RecentSessions {
             cache[f.path]?.takeIf { it.first == f.lastModified() }?.let { return@map it.second }
             var title: String? = null
             var first: String? = null
+            var custom = false
             runCatching {
                 f.useLines { lines -> lines.forEach { l ->
-                    if (l.contains("\"ai-title\"")) Regex("\"aiTitle\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(l)?.let { title = it.groupValues[1] }
+                    if (l.contains("\"custom-title\"")) Regex("\"customTitle\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(l)?.let { title = it.groupValues[1]; custom = true }
+                    else if (l.contains("\"ai-title\"")) { if (!custom) Regex("\"aiTitle\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(l)?.let { title = it.groupValues[1] } }
                     else if (first == null && l.contains("\"lastPrompt\"")) Regex("\"lastPrompt\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(l)?.let { first = it.groupValues[1] }
                 } }
             }
@@ -131,13 +136,24 @@ object RecentSessions {
  * Vorschläge beim Tippen von `/` im Eingabefeld: Liste über dem Feld, ↑/↓ wählt, Enter oder Tab übernimmt, Esc schließt.
  * Das Feld behält den Fokus. [enabled]: nur, wenn Slash-Befehle die Session auch erreichen (Terminal).
  */
-class SlashCompletion(private val project: Project, private val area: JTextComponent, private val enabled: () -> Boolean) {
+class SlashCompletion(
+    private val project: Project,
+    private val area: JTextComponent,
+    /** Kurze Marke für eine per `@` gewählte Datei (geht beim Senden als `@pfad` raus). */
+    private val fileToken: (String) -> String = { "@$it" },
+    private val enabled: () -> Boolean,
+) {
     private val model = javax.swing.DefaultListModel<SlashCommand>()
     private val list = JBList(model).apply {
         selectionMode = ListSelectionModel.SINGLE_SELECTION
         visibleRowCount = 8
         cellRenderer = object : ColoredListCellRenderer<SlashCommand>() {
             override fun customizeCellRenderer(list: JList<out SlashCommand>, value: SlashCommand, index: Int, selected: Boolean, hasFocus: Boolean) {
+                if (fileMode) {
+                    append(value.name)
+                    append("  " + value.description, SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    return
+                }
                 if (resumeMode) {
                     append(value.description.ifBlank { value.name.take(8) })
                     append("  " + value.source, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
@@ -155,6 +171,12 @@ class SlashCompletion(private val project: Project, private val area: JTextCompo
     private var popup: JBPopup? = null
     /** `/resume <...>`: Liste der früheren Sessions statt der Befehle. */
     private var resumeMode = false
+    /** `@…`: offene Editor-Dateien statt Befehle; [SlashCommand.source] hält dann den Pfad. */
+    private var fileMode = false
+    /** Anfang (Position des `/`) des Befehls, für den die Liste gerade gilt. */
+    private var slashAt = 0
+    /** Per Esc geschlossen: für dieses `/` nicht wieder öffnen, bis ein neues getippt wird. */
+    private var dismissedAt = -1
 
     val isVisible get() = popup?.isVisible == true
 
@@ -174,7 +196,7 @@ class SlashCompletion(private val project: Project, private val area: JTextCompo
         key("UP", "handoff.slash.up") { move(-1) }
         key("DOWN", "handoff.slash.down") { move(1) }
         key("TAB", "handoff.slash.tab") { accept() }
-        key("ESCAPE", "handoff.slash.escape") { hide() }
+        key("ESCAPE", "handoff.slash.escape") { dismissedAt = slashAt; hide() }
     }
 
     /** Für die Enter-Taste des Feldes: true, wenn Enter einen Vorschlag übernommen hat. */
@@ -184,40 +206,126 @@ class SlashCompletion(private val project: Project, private val area: JTextCompo
 
     private fun update() {
         val text = area.text
-        if (!enabled() || !area.isShowing) return hide()
-        Regex("^/resume\\s+(\\S*)$").find(text)?.let { m ->
+        if (!area.isShowing) return hide()
+        if (enabled()) Regex("^/resume\\s+(\\S*)$").find(text)?.let { m ->
             val q = m.groupValues[1]
             val sessions = RecentSessions.list(project).filter { q.isEmpty() || it.name.startsWith(q) || it.description.contains(q, ignoreCase = true) }
             if (sessions.isEmpty()) return hide()
-            resumeMode = true
+            resumeMode = true; slashAt = 0
             model.clear(); sessions.forEach(model::addElement)
             list.selectedIndex = 0
-            if (!isVisible) show() else popup?.pack(true, true)
+            if (!isVisible) show() else place()
             return
         }
         resumeMode = false
-        val typed = text.takeIf { it.startsWith("/") && it.none { c -> c.isWhitespace() } }?.drop(1) ?: return hide()
+        fileMode = false
+        // `@` am Anfang oder nach Leerraum: offene Dateien als Kontext (geht auch ohne Terminal - es ist nur Text).
+        run {
+            val caret = area.caretPosition.coerceIn(0, text.length)
+            val start = text.lastIndexOf('@', caret - 1).takeIf { it >= 0 } ?: return@run
+            if (start > 0 && !text[start - 1].isWhitespace()) return@run
+            val typed = text.substring(start + 1, caret)
+            if (typed.any { it.isWhitespace() }) return@run
+            if (start == dismissedAt) return hide()
+            val open = openFiles().filter { typed.isEmpty() || it.name.contains(typed, ignoreCase = true) || it.description.contains(typed, ignoreCase = true) }
+                .sortedBy { if (it.name.startsWith(typed, ignoreCase = true)) 0 else 1 }
+            // Ab zwei Buchstaben auch Dateien aus dem ganzen Projekt, unter den offenen.
+            val files = if (typed.length < 2) open else (open + projectFiles(typed)).distinctBy { it.source }
+            if (files.isEmpty()) return hide()
+            fileMode = true; slashAt = start
+            model.clear(); files.forEach(model::addElement)
+            list.selectedIndex = 0
+            if (!isVisible) show() else place()
+            return
+        }
+        if (!enabled()) return hide()
+        // Auch mitten im Prompt: `/` am Anfang oder nach einem Leerraum, bis zur Schreibmarke ohne Leerzeichen. Pfade
+        // (/Users/…) finden keinen Befehl und schließen die Liste von selbst.
+        val caret = area.caretPosition.coerceIn(0, text.length)
+        val start = text.lastIndexOf('/', caret - 1).takeIf { it >= 0 } ?: return hide().also { dismissedAt = -1 }
+        if (start > 0 && !text[start - 1].isWhitespace()) return hide()
+        val typed = text.substring(start + 1, caret)
+        if (typed.any { it.isWhitespace() || it == '/' }) return hide()
+        if (start != dismissedAt) dismissedAt = -1 else return hide()
+        slashAt = start
         val all = SlashCommands.all(project)
         val matches = all.filter { it.name.startsWith(typed, ignoreCase = true) } +
             all.filter { !it.name.startsWith(typed, ignoreCase = true) && it.name.contains(typed, ignoreCase = true) }
         if (matches.isEmpty() || (matches.size == 1 && matches[0].name == typed)) return hide()
         model.clear(); matches.forEach(model::addElement)
         list.selectedIndex = 0
-        if (!isVisible) show() else popup?.pack(true, true)
+        if (!isVisible) show() else place()
     }
 
     private fun show() {
         val p = JBPopupFactory.getInstance().createComponentPopupBuilder(JBScrollPane(list).apply { border = JBUI.Borders.empty() }, null)
             .setRequestFocus(false).setFocusable(false).setCancelOnClickOutside(true).setResizable(false).createPopup()
         popup = p
-        val size = p.content.preferredSize
-        val width = maxOf(area.width, JBUI.scale(420))
-        p.size = java.awt.Dimension(width, size.height)
-        // Über dem Feld - es steht am unteren Rand des Reiters.
-        p.show(RelativePoint(area, Point(0, -size.height - JBUI.scale(4))))
+        val (at, size) = bounds(p)
+        p.size = size
+        p.show(RelativePoint(area, at))
+    }
+
+    /**
+     * Größe und Lage nach jedem Tippen neu: Die Liste steht direkt über der Zeile mit dem `/` bzw. `@` und beginnt an
+     * dessen Spalte. Nur die Höhe anzupassen ließ sie oben stehen - beim Kürzen entstand eine Lücke zum Text (2026-11-16).
+     */
+    private fun place() {
+        val p = popup ?: return
+        val (at, size) = bounds(p)
+        p.size = size
+        p.setLocation(RelativePoint(area, at).screenPoint)
+    }
+
+    private fun bounds(p: JBPopup): Pair<Point, java.awt.Dimension> {
+        list.visibleRowCount = model.size().coerceIn(1, 8)
+        // popup.size setzt die bevorzugte Größe des Inhalts fest - ohne Zurücksetzen bliebe die Liste so hoch wie beim
+        // ersten Zeigen, auch wenn Tippen sie auf wenige Treffer kürzt (2026-11-17).
+        p.content.preferredSize = null
+        list.invalidate()
+        val height = p.content.preferredSize.height
+        val width = minOf(maxOf(JBUI.scale(420), list.preferredSize.width + JBUI.scale(24)), maxOf(area.width, JBUI.scale(420)), JBUI.scale(640))
+        val r = runCatching { area.modelToView2D(slashAt.coerceIn(0, area.document.length)) }.getOrNull()
+        val x = ((r?.x ?: 0.0).toInt() - JBUI.scale(4)).coerceIn(0, maxOf(0, area.width - width))
+        val y = (r?.y ?: 0.0).toInt() - height - JBUI.scale(4)
+        return Point(x, y) to java.awt.Dimension(width, height)
     }
 
     fun hide() { popup?.cancel(); popup = null }
+
+    /** Offene Editor-Dateien (zuletzt gewählte zuerst), ohne Handoff-eigene Reiter: Name, Ordner relativ zum Projekt, Pfad. */
+    private fun openFiles(): List<SlashCommand> {
+        val fem = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+        val selected = fem.selectedFiles.toSet()
+        val base = project.basePath
+        return fem.openFiles.filter { it.isInLocalFileSystem }.sortedBy { if (it in selected) 0 else 1 }.map { f ->
+            val dir = f.parent?.path.orEmpty()
+            val shown = if (base != null && dir.startsWith(base)) dir.removePrefix(base).removePrefix("/").ifEmpty { "." } else dir.replaceFirst(System.getProperty("user.home"), "~")
+            SlashCommand(f.name, shown, f.path)
+        }.distinctBy { it.source }
+    }
+
+    /**
+     * Projektdateien, deren Name [typed] enthält (Namensindex, nur Projektinhalt): Treffer am Namensanfang zuerst, dann
+     * kürzere Namen; höchstens 30. Während der Indizierung keine Treffer.
+     */
+    private fun projectFiles(typed: String): List<SlashCommand> = runCatching {
+        com.intellij.openapi.application.ApplicationManager.getApplication().runReadAction(com.intellij.openapi.util.Computable<List<SlashCommand>> {
+            if (com.intellij.openapi.project.DumbService.isDumb(project)) return@Computable emptyList()
+            val scope = com.intellij.psi.search.GlobalSearchScope.projectScope(project)
+            val names = mutableListOf<String>()
+            com.intellij.psi.search.FilenameIndex.processAllFileNames({ n -> if (n.contains(typed, ignoreCase = true)) names += n; names.size < 500 }, scope, null)
+            val base = project.basePath
+            names.sortedWith(compareBy({ if (it.startsWith(typed, ignoreCase = true)) 0 else 1 }, { it.length }, { it }))
+                .asSequence()
+                .flatMap { n -> com.intellij.psi.search.FilenameIndex.getVirtualFilesByName(n, scope).asSequence().filter { !it.isDirectory && it.isInLocalFileSystem } }
+                .take(30)
+                .map { f ->
+                    val dir = f.parent?.path.orEmpty()
+                    SlashCommand(f.name, if (base != null && dir.startsWith(base)) dir.removePrefix(base).removePrefix("/").ifEmpty { "." } else dir, f.path)
+                }.toList()
+        })
+    }.getOrDefault(emptyList())
 
     private fun move(delta: Int) {
         if (model.isEmpty) return
@@ -229,8 +337,17 @@ class SlashCompletion(private val project: Project, private val area: JTextCompo
         val c = list.selectedValue ?: return hide()
         hide()
         if (resumeMode) { area.text = "/resume " + c.name; area.caretPosition = area.text.length; return }
-        area.text = "/" + c.name + " "
-        area.caretPosition = area.text.length
+        if (fileMode) {
+            val caret = area.caretPosition.coerceIn(slashAt, area.text.length)
+            val insert = fileToken(c.source) + " "
+            area.text = area.text.substring(0, slashAt) + insert + area.text.substring(caret).trimStart(' ')
+            area.caretPosition = slashAt + insert.length
+            return
+        }
+        val caret = area.caretPosition.coerceIn(slashAt, area.text.length)
+        val insert = "/" + c.name + " "
+        area.text = area.text.substring(0, slashAt) + insert + area.text.substring(caret).trimStart(' ')
+        area.caretPosition = slashAt + insert.length
         // Gleich die Sessions zeigen.
         if (c.name == "resume") later()
     }
@@ -270,7 +387,7 @@ object SlashPicker {
             popup?.cancel()
             action("/" + c.name)
         }
-        val runButton = javax.swing.JButton("Run").apply { putClientProperty("JButton.buttonType", "default"); addActionListener { pick(run) } }
+        val runButton = javax.swing.JButton("Run").apply { primary(); addActionListener { pick(run) } }
         val insertButton = javax.swing.JButton("Insert").apply { toolTipText = "Insert at the cursor in the prompt (Tab)"; addActionListener { pick(insert) } }
         val panel = javax.swing.JPanel(java.awt.BorderLayout(0, com.intellij.util.ui.JBUI.scale(6))).apply {
             border = com.intellij.util.ui.JBUI.Borders.empty(8)

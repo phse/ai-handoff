@@ -52,6 +52,17 @@ object ScreenshotMaker {
             frame.setBounds(60, 40, 1280, 800)
         }
         Thread.sleep(8000)
+        // Statt Startseite, "What's New" (mit Air-Werbung) und Mitteilungen eine kurze Projektbeschreibung im Editor.
+        edt {
+            val m = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+            m.openFiles.forEach(m::closeFile)
+            com.intellij.notification.NotificationsManager.getNotificationsManager()
+                .getNotificationsOfType(com.intellij.notification.Notification::class.java, project).forEach { it.expire() }
+            com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(File(base, "README.md"))?.let {
+                com.intellij.openapi.fileEditor.OpenFileDescriptor(project, it).navigate(false)
+            }
+        }
+        Thread.sleep(2000)
         val tw = edt { ToolWindowManager.getInstance(project).getToolWindow("Handoff") } ?: error("no tool window")
         edt { tw.show() }
         Thread.sleep(2000)
@@ -80,7 +91,17 @@ object ScreenshotMaker {
         ))
         var dialog: MarkupDialog? = null
         ApplicationManager.getApplication().invokeLater({
-            dialog = MarkupDialog(project, images, 1, marks, true)
+            // Freihand-Zeichnungen (1.6.0): roter Kreis um die Überschrift, grüne Linie unter dem ersten Artikel.
+            val circle = (0..48).map { i ->
+                val a = i * 2 * Math.PI / 44 - 0.3
+                java.awt.geom.Point2D.Float((205 + 125 * Math.cos(a) * (1 + 0.04 * Math.sin(3 * a))).toFloat(), (133 + 42 * Math.sin(a)).toFloat())
+            }.toMutableList()
+            val line = (0..20).map { i -> java.awt.geom.Point2D.Float(110f + i * 8f, (238 + 2.5 * Math.sin(i * 0.9)).toFloat()) }.toMutableList()
+            val shapes = mapOf(1 to listOf(
+                app.heckit.ide.aihandoff.Shape(app.heckit.ide.aihandoff.ShapeKind.PEN, app.heckit.ide.aihandoff.Drawing.COLORS[0].second, 5f, circle),
+                app.heckit.ide.aihandoff.Shape(app.heckit.ide.aihandoff.ShapeKind.PEN, app.heckit.ide.aihandoff.Drawing.COLORS[2].second, 4f, line),
+            ))
+            dialog = MarkupDialog(project, images, 1, marks, true, shapes)
             dialog!!.show()
         }, ModalityState.any())
         Thread.sleep(3000)
@@ -238,7 +259,8 @@ object ScreenshotMaker {
             tool("Edit", "file_path", "${base.path}/src/cart.js"),
             tool("Bash", "command", "npm test"),
             text("Done. Orders from **50 €** now ship for free:\n\n- `src/cart.js:3` holds the threshold `FREE_SHIPPING_FROM`\n" +
-                "- the shipping fee is added only below it\n- all 24 tests pass\n\nThe docs for the rule: https://example.com/docs/shipping"),
+                "- the shipping fee is added only below it\n- all 24 tests pass\n\nThe docs for the rule: https://example.com/docs/shipping\n\n" +
+                "The context is getting long; before the next step:\n\n/compact Keep only the shipping rule and the open question"),
             user("Should the threshold apply before or after the discount?"),
             tool("mcp__phpstorm__handoff_ask", "title", "Free shipping and discounts"),
             """{"type":"ai-title","aiTitle":"Free shipping threshold"}""",
@@ -281,7 +303,7 @@ object ScreenshotMaker {
                     .filter { it.text == "/" || it.text == "Send" }.forEach { it.isEnabled = true }
                 com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
                     .filter { it.text.orEmpty().startsWith("Enter sends") }
-                    .forEach { it.text = "Enter sends, Shift+Enter adds a line. Goes to the terminal as if typed, slash commands included." }
+                    .forEach { it.text = "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included." }
             }
             // Hinweise der Sandbox (z. B. "Cannot update plugin") nicht ins Bild.
             com.intellij.notification.NotificationsManager.getNotificationsManager()

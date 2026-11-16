@@ -331,7 +331,7 @@ class NewSessionAction : com.intellij.openapi.actionSystem.AnAction(com.intellij
  * Bilder aus der Zwischenablage (Bildschirmfoto) werden vorher als PNG unter `~/.claude/handoff/images/` gespeichert.
  * Text geht wie gewohnt an den ursprünglichen Handler.
  */
-private class ImageDropHandler(private val delegate: javax.swing.TransferHandler) : javax.swing.TransferHandler() {
+private class ImageDropHandler(private val delegate: javax.swing.TransferHandler, private val shorten: (String) -> String) : javax.swing.TransferHandler() {
     private val files = java.awt.datatransfer.DataFlavor.javaFileListFlavor
     private val image = java.awt.datatransfer.DataFlavor.imageFlavor
 
@@ -352,7 +352,7 @@ private class ImageDropHandler(private val delegate: javax.swing.TransferHandler
             }
         }.getOrDefault(emptyList())
         if (paths.isEmpty()) return delegate.importData(support)
-        val text = paths.joinToString(" ") { if (it.contains(' ')) "\"$it\"" else it }
+        val text = paths.joinToString(" ") { shorten(it) }
         val pos = if (support.isDrop) area.viewToModel2D((support.dropLocation as javax.swing.text.JTextComponent.DropLocation).dropPoint.let { it }) .coerceAtLeast(0) else area.caretPosition
         val before = area.text.getOrNull(pos - 1)
         area.document.insertString(pos, (if (before != null && !before.isWhitespace()) " " else "") + text + " ", null)
@@ -390,8 +390,22 @@ object SessionLinks {
             link.startsWith("action:") -> runAction(project, link.removePrefix("action:"))
             link.startsWith("handoff:") -> Actions.run(project, link.removePrefix("handoff:"))
             link.startsWith("http://") || link.startsWith("https://") || link.startsWith("mailto:") -> BrowserUtil.browse(link)
-            else -> if (!openFile(project, link.removePrefix("file://"), base)) BrowserUtil.browse(link)
+            else -> if (!openFile(project, link.removePrefix("file://"), base)) openDir(project, link, base)
         }
+    }
+
+    /**
+     * Ordner-Link: im Projektfenster auswählen, liegt er außerhalb des Projekts, im Finder zeigen. Nie an den Browser geben -
+     * ein relativer Pfad wie `example-plugin-project/x` öffnete sonst eine kaputte Web-Adresse (2026-11-16).
+     */
+    private fun openDir(project: Project, link: String, base: String?) {
+        val dir = fileOf(link, base)?.takeIf { it.isDirectory } ?: return
+        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(dir)
+        if (vf != null && com.intellij.openapi.roots.ProjectFileIndex.getInstance(project).isInContent(vf)) {
+            com.intellij.openapi.wm.ToolWindowManager.getInstance(project).getToolWindow("Project")?.activate {
+                com.intellij.ide.projectView.ProjectView.getInstance(project).select(null, vf, true)
+            }
+        } else com.intellij.ide.actions.RevealFileAction.openDirectory(dir)
     }
 
     private fun runAction(project: Project, id: String) {
@@ -506,6 +520,9 @@ object SessionLinks {
             file != null -> {
                 if (file.isFile) group.add(act("Open in Editor") { open(project, link, base) })
                 group.add(act("Reveal in Finder") { com.intellij.ide.actions.RevealFileAction.openFile(file.toPath()) })
+                if (file.isDirectory) group.add(act("Open as Project") {
+                    com.intellij.ide.impl.ProjectUtil.openOrImport(file.path, null, true)
+                })
                 if (SessionTerminals.available) group.add(act("Open in Terminal") { SessionTerminals.shell(project, (if (file.isDirectory) file else file.parentFile).path) })
                 group.add(copy(file.path).apply { templatePresentation.text = "Copy Path" })
             }
@@ -531,15 +548,23 @@ class TranscriptEntry(val kind: Kind, val text: String) {
 class Transcript(val path: String) {
     val entries = mutableListOf<TranscriptEntry>()
     var title: String? = null
+    /** Per /rename gesetzt: gilt vor dem automatischen Titel, auch vor später geschriebenen ai-title-Zeilen. */
+    private var customTitle = false
         private set
     private var offset = 0L
+    /**
+     * Laufende Hintergrundaufgaben (Kennung → Werkzeugzeile). Claude Code vermerkt den Start im Ergebnis des Befehls
+     * (`toolUseResult.backgroundTaskId`), das Ende als Nutzer-Nachricht `<task-notification>` mit `<task-id>` (2.1.325).
+     */
+    val background = linkedMapOf<String, String>()
+    private val toolLines = HashMap<String, String>()
 
     /** Neue Zeilen einlesen; true, wenn sich etwas geändert hat. */
     fun update(): Boolean {
         val file = File(path)
         if (!file.isFile) return false
         val length = file.length()
-        if (length < offset) { offset = 0; entries.clear() }
+        if (length < offset) { offset = 0; entries.clear(); background.clear(); toolLines.clear() }
         if (length == offset) return false
         val bytes = RandomAccessFile(file, "r").use { raf ->
             raf.seek(offset)
@@ -548,9 +573,9 @@ class Transcript(val path: String) {
         val end = bytes.lastIndexOf('\n'.code.toByte())
         if (end < 0) return false
         offset += end + 1
-        val before = entries.size to title
+        val before = Triple(entries.size, title, background.keys.toList())
         String(bytes, 0, end, Charsets.UTF_8).lineSequence().forEach { line -> if (line.isNotBlank()) runCatching { parse(JsonParser.parseString(line).asJsonObject) } }
-        return (entries.size to title) != before
+        return Triple(entries.size, title, background.keys.toList()) != before
     }
 
     private fun JsonObject.str(k: String) = get(k)?.takeIf { it.isJsonPrimitive }?.asString
@@ -558,14 +583,24 @@ class Transcript(val path: String) {
     private fun parse(o: JsonObject) {
         if (o.get("isSidechain")?.asBoolean == true || o.get("isMeta")?.asBoolean == true) return
         when (o.str("type")) {
-            "ai-title" -> title = o.str("aiTitle") ?: title
+            "ai-title" -> if (!customTitle) title = o.str("aiTitle") ?: title
+            "custom-title" -> o.str("customTitle")?.takeIf { it.isNotBlank() }?.let { title = it; customTitle = true }
             // Während Claude arbeitet abgeschickte Prompts stehen nur als Anhang im Protokoll.
             "attachment" -> {
                 val a = o.getAsJsonObject("attachment") ?: return
-                if (a.str("type") == "queued_command") a.str("prompt")?.trim()?.let { userText(it) }?.let { entries += it }
+                if (a.str("type") == "queued_command") a.str("prompt")?.trim()?.let { prompt ->
+                    // Endet eine Hintergrund-Aufgabe, während Claude arbeitet, kommt die <task-notification> als eingereihter
+                    // Befehl statt als Nutzer-Nachricht - ohne diese Prüfung blieben solche Aufgaben ewig "running" (2026-11-16).
+                    TASK_DONE.findAll(prompt).forEach { background.remove(it.groupValues[1]) }
+                    userText(prompt)?.let { entries += it }
+                }
             }
+            // Lokale Slash-Befehle (/rename …) und ihre Ausgabe schreibt Claude Code als "system"/"local_command" - ohne diesen
+            // Zweig blieb der Befehl im Tab ewig "Queued", obwohl er längst gelaufen war (2026-11-16).
+            "system" -> if (o.str("subtype") == "local_command") o.str("content")?.let { userText(it) }?.let { entries += it }
             "user" -> {
                 val content = o.getAsJsonObject("message")?.get("content") ?: return
+                trackBackground(o, content)
                 val text = texts(content).joinToString("\n").trim()
                 // Zusammenfassung nach /compact: steht als Nutzer-Nachricht im Protokoll, wird eingeklappt gezeigt.
                 if (o.get("isCompactSummary")?.asBoolean == true) { if (text.isNotEmpty()) entries += TranscriptEntry(TranscriptEntry.Kind.SUMMARY, text); return }
@@ -577,12 +612,27 @@ class Transcript(val path: String) {
                     val c = item.takeIf { it.isJsonObject }?.asJsonObject ?: return@forEach
                     when (c.str("type")) {
                         "text" -> c.str("text")?.trim()?.takeIf { it.isNotEmpty() }?.let { entries += TranscriptEntry(TranscriptEntry.Kind.ASSISTANT, it) }
-                        "tool_use" -> entries += TranscriptEntry(TranscriptEntry.Kind.TOOL, toolLine(c.str("name").orEmpty(), c.getAsJsonObject("input")))
+                        "tool_use" -> {
+                            val line = toolLine(c.str("name").orEmpty(), c.getAsJsonObject("input"))
+                            c.str("id")?.let { toolLines[it] = line }
+                            if (c.str("name") == "TaskStop") c.getAsJsonObject("input")?.let { i -> (i.str("task_id") ?: i.str("shell_id"))?.let { background.remove(it) } }
+                            entries += TranscriptEntry(TranscriptEntry.Kind.TOOL, line)
+                        }
                     }
                 }
             }
         }
     }
+
+    private fun trackBackground(o: JsonObject, content: JsonElement) {
+        o.getAsJsonObject("toolUseResult")?.str("backgroundTaskId")?.let { task ->
+            val toolId = content.takeIf { it.isJsonArray }?.asJsonArray?.firstNotNullOfOrNull { it.takeIf { e -> e.isJsonObject }?.asJsonObject?.str("tool_use_id") }
+            background[task] = toolId?.let { toolLines[it] } ?: "Background task"
+        }
+        texts(content).forEach { t -> TASK_DONE.findAll(t).forEach { background.remove(it.groupValues[1]) } }
+    }
+
+    private companion object { val TASK_DONE = Regex("<task-notification>\\s*<task-id>([^<]+)</task-id>") }
 
     private fun texts(content: JsonElement): List<String> = when {
         content.isJsonPrimitive -> listOf(content.asString)
@@ -634,6 +684,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val pending = mutableListOf<String>()
     /** Zahl der Prompts im Protokoll, als der älteste vorgemerkte abgeschickt wurde. */
     private var pendingBase = 0
+    /** Davon per Ctrl+Enter sofort gesendet. */
+    private val sentNow = mutableSetOf<String>()
     /** Aufgeklappte Gruppen von Werkzeug-Schritten (Index des ersten Schritts im Protokoll). */
     private val expanded = mutableSetOf<Int>()
 
@@ -659,19 +711,42 @@ private class SessionEditor(private val project: Project, private val file: Sess
         addHyperlinkListener { e ->
             if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
             val link = e.description ?: e.url?.toString() ?: return@addHyperlinkListener
+            if (link.startsWith(RUN_LINK)) {
+                val cmd = java.net.URLDecoder.decode(link.removePrefix(RUN_LINK), Charsets.UTF_8)
+                if (file.tab != null && terminalOpen) runCommand(cmd)
+                else hint.text = "Slash commands only reach sessions started here (New Claude Session)."
+                return@addHyperlinkListener
+            }
+            if (link.startsWith(PROMPT_LINK)) {
+                input.text = java.net.URLDecoder.decode(link.removePrefix(PROMPT_LINK), Charsets.UTF_8)
+                input.requestFocusInWindow(); input.caretPosition = input.document.length
+                return@addHyperlinkListener
+            }
             if (link.startsWith(STEPS_LINK)) {
                 link.removePrefix(STEPS_LINK).toIntOrNull()?.let { if (!expanded.remove(it)) expanded += it; renderTranscript(force = false) }
                 return@addHyperlinkListener
             }
             SessionLinks.open(project, link, baseDir())
         }
+        // Tooltip für vorgeschlagene Slash-Befehle (Swing-HTML zeigt kein title-Attribut an).
+        addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+            override fun mouseMoved(e: java.awt.event.MouseEvent) {
+                val href = linkAt(e.point)
+                val tip = when {
+                    href?.startsWith(RUN_LINK) == true -> "Run now"
+                    href?.startsWith(PROMPT_LINK) == true -> "Use as prompt"
+                    else -> null
+                }
+                if (tip != toolTipText) toolTipText = tip
+            }
+        })
         // Rechtsklick auf einen Link: Aktionen je nach Ziel.
         addMouseListener(object : java.awt.event.MouseAdapter() {
             override fun mousePressed(e: java.awt.event.MouseEvent) = popup(e)
             override fun mouseReleased(e: java.awt.event.MouseEvent) = popup(e)
             private fun popup(e: java.awt.event.MouseEvent) {
                 if (!e.isPopupTrigger) return
-                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) } ?: return
+                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) || it.startsWith(PROMPT_LINK) || it.startsWith(RUN_LINK) } ?: return
                 com.intellij.openapi.actionSystem.ActionManager.getInstance()
                     .createActionPopupMenu("HandoffSession", SessionLinks.menu(project, href, baseDir())).component.show(this@apply, e.x, e.y)
                 e.consume()
@@ -832,12 +907,16 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 }
                 if (line.isNotEmpty()) g2.drawString(line.toString(), i.left, y)
             } finally { g2.dispose() }
+            // Der Vorschlag liegt über der Schreibmarke am Zeilenanfang - sie danach noch einmal zeichnen, sonst ist bei
+            // leerem Feld kein Cursor zu sehen (2026-11-16).
+            caret?.paint(g)
         }
     }.apply {
         lineWrap = true; wrapStyleWord = true; font = UIUtil.getLabelFont()
         border = JBUI.Borders.empty(6, 8)
         inputMap.put(KeyStroke.getKeyStroke("ENTER"), "handoff.send")
         inputMap.put(KeyStroke.getKeyStroke("shift ENTER"), "insert-break")
+        // Ctrl+Enter (auch Cmd+Enter) wie im Terminal: sofort senden, statt bis nach Claudes laufendem Schritt zu warten.
         // Tab bei leerem Feld übernimmt den Vorschlag von Claude Code (wie im Terminal); die Slash-Liste hängt sich davor.
         inputMap.put(KeyStroke.getKeyStroke("TAB"), "handoff.suggestion")
         // Esc wie im Terminal: Claude unterbrechen, solange es arbeitet (die Slash-Liste schließt Esc vorher, falls offen).
@@ -858,7 +937,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         actionMap.put("handoff.send", object : AbstractAction() {
             override fun actionPerformed(e: java.awt.event.ActionEvent) { if (!slash.acceptIfVisible()) send() }
         })
-        transferHandler = ImageDropHandler(transferHandler)
+        transferHandler = ImageDropHandler(transferHandler) { path -> attach(path) }
         addMouseListener(object : java.awt.event.MouseAdapter() {
             override fun mousePressed(e: java.awt.event.MouseEvent) { if (watchKeys) SwingUtilities.invokeLater { logInputState("clicked") } }
         })
@@ -880,7 +959,112 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val markLink = ActionLink("Mark Areas in Image…") { markImages() }.apply { isVisible = false }
     private val IMAGE = Regex("""(?:"([^"]+\.(?:png|jpe?g|gif|webp))"|(\S+\.(?:png|jpe?g|gif|webp)))""", RegexOption.IGNORE_CASE)
 
-    private fun imagesInPrompt(): List<String> = IMAGE.findAll(input.text).map { it.groupValues[1].ifEmpty { it.groupValues[2] } }
+    /**
+     * Gezogene oder eingefügte Dateien stehen im Feld kurz als `[Image #1]` bzw. `[File #2: name.pdf]` (wie im Terminal);
+     * beim Senden wird daraus wieder der Pfad. Wer eine Marke von Hand ändert, schickt sie als Text.
+     */
+    private val attachments = LinkedHashMap<String, String>()
+
+    private fun attach(path: String): String {
+        attachments.entries.firstOrNull { it.value == path }?.let { return it.key }
+        val n = attachments.size + 1
+        val token = if (IMAGE.matches(path) || IMAGE.matches("\"$path\"")) "[Image #$n]" else "[File #$n: ${File(path).name}]"
+        attachments[token] = path
+        return token
+    }
+
+    /** Per `@` gewählte Datei: Marke wie bei gezogenen Dateien, geht als `@pfad` an Claude (Claude Code liest sie dann mit). */
+    private fun mention(path: String): String {
+        attachments.entries.firstOrNull { it.value == "@$path" }?.let { return it.key }
+        val token = "[@${File(path).name} #${attachments.size + 1}]"
+        attachments[token] = "@$path"
+        return token
+    }
+
+    /** Prompt mit Pfaden statt Marken. */
+    private fun expanded(text: String = input.text): String =
+        attachments.entries.fold(text) { t, (token, path) ->
+            // @-Erwähnungen: Claude Code erkennt Leerzeichen im Pfad nur mit Backslash (`@a\ b`, Regex in 2.1.325).
+            t.replace(token, when { path.startsWith("@") -> path.replace(" ", "\\ "); path.contains(' ') -> "\"$path\""; else -> path })
+        }
+
+    private val previewSizes = HashMap<String, String>()
+
+    /** width/height fürs Vorschaubild im Tooltip (Swing-HTML skaliert nicht von selbst proportional), max. 240 px. */
+    private fun previewSize(path: String): String = previewSizes.getOrPut(path) {
+        val (w, h) = runCatching {
+            javax.imageio.ImageIO.createImageInputStream(File(path)).use { stream ->
+                val reader = javax.imageio.ImageIO.getImageReaders(stream).next()
+                try { reader.input = stream; reader.getWidth(0) to reader.getHeight(0) } finally { reader.dispose() }
+            }
+        }.getOrDefault(240 to 160)
+        val f = minOf(1.0, 240.0 / maxOf(w, h))
+        "width=\"${(w * f).toInt()}\" height=\"${(h * f).toInt()}\""
+    }
+
+    /** Marke an [pos] (Bereich start until end), sonst null; [inside] = nur echt innerhalb, nicht an den Rändern. */
+    private fun tokenAt(pos: Int, inside: Boolean = false): IntRange? {
+        val text = input.text
+        for (token in attachments.keys) {
+            var i = text.indexOf(token)
+            while (i >= 0) {
+                val end = i + token.length
+                if (if (inside) pos in (i + 1) until end else pos in i..end) return i until end
+                i = text.indexOf(token, i + 1)
+            }
+        }
+        return null
+    }
+
+    /**
+     * Marken wie `[Image #1]` verhalten sich wie ein Zeichen: Backspace/Entf löschen sie ganz, die Schreibmarke springt über sie,
+     * und der Tooltip zeigt Pfad und bei Bildern ein Vorschaubild. Halb gelöscht ginge sie sonst als Text ohne Pfad raus.
+     */
+    init {
+        fun remover(stroke: String, before: Boolean) {
+            val ks = KeyStroke.getKeyStroke(stroke)
+            val previous = input.inputMap.get(ks)?.let { input.actionMap.get(it) }
+            val name = "handoff.token.$stroke"
+            input.inputMap.put(ks, name)
+            input.actionMap.put(name, object : AbstractAction() {
+                override fun actionPerformed(e: java.awt.event.ActionEvent) {
+                    val c = input.caretPosition
+                    val r = if (input.selectionStart == input.selectionEnd) tokenAt(if (before) c - 1 else c + 1, inside = false)
+                        ?.takeIf { if (before) it.last + 1 == c else it.first == c } else null
+                    if (r != null) input.document.remove(r.first, r.last + 1 - r.first) else previous?.actionPerformed(e)
+                }
+            })
+        }
+        remover("BACK_SPACE", before = true)
+        remover("DELETE", before = false)
+        var last = 0
+        input.addCaretListener { e ->
+            val pos = e.dot
+            if (e.dot != e.mark) { last = pos; return@addCaretListener }
+            val r = tokenAt(pos, inside = true)
+            if (r != null) SwingUtilities.invokeLater {
+                // Von links kommend ans Ende, von rechts kommend an den Anfang.
+                val to = if (pos >= last) r.last + 1 else r.first
+                if (input.caretPosition == pos && to <= input.document.length) input.caretPosition = to
+            }
+            last = pos
+        }
+        input.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+            override fun mouseMoved(e: java.awt.event.MouseEvent) {
+                val pos = input.viewToModel2D(e.point)
+                val r = tokenAt(pos, inside = true)
+                val tip = r?.let { attachments[input.text.substring(it.first, it.last + 1)] }?.let { v ->
+                    val path = v.removePrefix("@")
+                    val esc = StringUtil.escapeXmlEntities(path)
+                    if (IMAGE.matches(path) || IMAGE.matches("\"$path\""))
+                        "<html>$esc<br><img src=\"${File(path).toURI()}\" ${previewSize(path)}></html>" else "<html>$esc</html>"
+                }
+                if (tip != input.toolTipText) input.toolTipText = tip
+            }
+        })
+    }
+
+    private fun imagesInPrompt(): List<String> = IMAGE.findAll(expanded()).map { it.groupValues[1].ifEmpty { it.groupValues[2] } }
         .filter { File(it).isFile }.distinct().toList()
 
     private fun updateMarkLink() {
@@ -891,6 +1075,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private val MARK_LINE = Regex("""^- (.+), area x=(\d+) y=(\d+) w=(\d+) h=(\d+) px(?:: (.*))?$""")
     private val MARK_HEAD = "Marked areas (pixels of the original image):"
+    private val DRAW_HEAD = "Drawings (copies of the images with my drawing on top - read them):"
+    private val DRAW_LINE = Regex("""^- (.+), drawing: (.+\.png)$""")
+    /** Zeichnungen je Bildpfad - lassen sich aus dem Prompt-Text nicht zurücklesen. */
+    private val promptShapes = HashMap<String, List<Shape>>()
 
     /**
      * Rahmen ziehen und beschriften; das Ergebnis steht als Text im Prompt (Bild, Pixelbereich, Notiz). Schon eingetragene
@@ -905,19 +1093,33 @@ private class SessionEditor(private val project: Project, private val file: Sess
             val (x, y, w, h) = (2..5).map { m.groupValues[it].toInt() }
             initial[i] = initial[i].orEmpty() + Mark(x, y, w, h, m.groupValues[6])
         }
-        val dialog = MarkupDialog(project, paths, 0, initial, true)
+        val dialog = MarkupDialog(project, paths, 0, initial, true, paths.indices.associateWith { promptShapes[paths[it]].orEmpty() })
         if (!dialog.showAndGet()) return
+        val drawnBefore = lines.mapNotNull { DRAW_LINE.matchEntire(it.trim()) }.associate { it.groupValues[1] to it.groupValues[2] }
+        val drawings = dialog.allShapes.toSortedMap().mapNotNull { (i, list) ->
+            val path = paths[i]; val name = File(path).name
+            if (list.isEmpty()) { promptShapes.remove(path); return@mapNotNull null }
+            // Unverändert: die vorhandene Kopie behalten.
+            val file = drawnBefore[name]?.takeIf { promptShapes[path] == list } ?: Drawing.save(path, list) ?: return@mapNotNull null
+            promptShapes[path] = list.map { it.copy() }
+            "- $name, drawing: $file"
+        }
         val marks = dialog.allMarks.toSortedMap().flatMap { (i, list) ->
             list.map { m -> "- ${File(paths[i]).name}, area x=${m.x} y=${m.y} w=${m.w} h=${m.h} px" + (if (m.note.isNotBlank()) ": ${m.note.trim()}" else "") }
         }
         // Alte Blöcke raus, ein neuer ans Ende.
-        val kept = lines.filterNot { it.trim() == MARK_HEAD || MARK_LINE.matches(it.trim()) }.joinToString("\n").replace(Regex("\n{3,}"), "\n\n").trimEnd()
-        input.text = if (marks.isEmpty()) kept else kept + (if (kept.isEmpty()) "" else "\n\n") + MARK_HEAD + "\n" + marks.joinToString("\n") + "\n"
+        val kept = lines.filterNot { it.trim() == MARK_HEAD || it.trim() == DRAW_HEAD || MARK_LINE.matches(it.trim()) || DRAW_LINE.matches(it.trim()) }
+            .joinToString("\n").replace(Regex("\n{3,}"), "\n\n").trimEnd()
+        val blocks = listOfNotNull(
+            marks.takeIf { it.isNotEmpty() }?.let { MARK_HEAD + "\n" + it.joinToString("\n") },
+            drawings.takeIf { it.isNotEmpty() }?.let { DRAW_HEAD + "\n" + it.joinToString("\n") },
+        )
+        input.text = if (blocks.isEmpty()) kept else kept + (if (kept.isEmpty()) "" else "\n\n") + blocks.joinToString("\n\n") + "\n"
         input.requestFocusInWindow()
     }
     private val send = JButton("Send").apply {
-        putClientProperty("JButton.buttonType", "default")
-        addActionListener { val id = sessionId; if (resumable && id != null) SessionEditors.resume(project, file, id, input.text) else send() }
+        primary()
+        addActionListener { val id = sessionId; if (resumable && id != null) SessionEditors.resume(project, file, id, expanded()) else send() }
     }
     /** Liste der Slash-Befehle: ausführen oder an der Schreibmarke in den Prompt übernehmen. */
     private val commands = SmallButton("/").apply {
@@ -965,7 +1167,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private fun runCommand(cmd: String) {
         val tab = file.tab ?: return
-        if (terminalOpen && SessionTerminals.send(project, tab, cmd)) input.requestFocusInWindow()
+        if (terminalOpen && SessionTerminals.send(project, tab, cmd)) {
+            // Wie beim Senden gleich als Prompt mit "Queued" zeigen - ohne Rückmeldung wirkte ▶ (etwa bei /compact, das
+            // eine Weile braucht) wie kaputt und wurde mehrfach geklickt (2026-11-17).
+            if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
+            pending += cmd; renderTranscript(force = true)
+            input.requestFocusInWindow()
+        }
     }
 
     private fun insertCommand(cmd: String) {
@@ -1022,7 +1230,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val sessionId get() = file.currentSession(project)
     private val terminalOpen get() = file.tab?.let { SessionTerminals.isOpen(project, it) } == true
     /** Vorschläge für Slash-Befehle - nur, wenn sie die Session erreichen (Terminal). */
-    private val slash: SlashCompletion = SlashCompletion(project, input) { terminalOpen }
+    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }) { terminalOpen }
 
     /**
      * Diktat und Eingabemethode zurücksetzen, bevor das Feld geleert wird: Nach einem diktierten und abgeschickten Prompt
@@ -1043,8 +1251,20 @@ private class SessionEditor(private val project: Project, private val file: Sess
         "Handoff: input $what enabled=${input.isEnabled} editable=${input.isEditable} focusOwner=${input.isFocusOwner} " +
             "windowActive=${SwingUtilities.getWindowAncestor(input)?.isActive} ime=${input.inputContext?.locale}")
 
-    private fun send() {
-        val text = input.text.trim().takeIf { it.isNotEmpty() } ?: return
+    init {
+        // Ctrl+Enter (auch Cmd+Enter) wie im Terminal: sofort senden, statt bis nach Claudes laufendem Schritt zu warten.
+        // Als AnAction am Feld, nicht per inputMap: Die Tastenbelegung der IDE greift vor der inputMap (Ctrl+Enter öffnete
+        // „Generate“, 2026-11-16); am Feld registrierte Kürzel haben Vorrang vor den globalen.
+        object : com.intellij.openapi.project.DumbAwareAction() {
+            override fun actionPerformed(e: com.intellij.openapi.actionSystem.AnActionEvent) { send(now = true) }
+        }.registerCustomShortcutSet(com.intellij.openapi.actionSystem.CustomShortcutSet(
+            com.intellij.openapi.actionSystem.KeyboardShortcut(KeyStroke.getKeyStroke("ctrl ENTER"), null),
+            com.intellij.openapi.actionSystem.KeyboardShortcut(KeyStroke.getKeyStroke("meta ENTER"), null)), input, this)
+    }
+
+    private fun send(now: Boolean = false) {
+        val shown = input.text.trim().takeIf { it.isNotEmpty() } ?: return
+        val text = expanded(shown)
         endDictation()
         watchKeys = true
         SwingUtilities.invokeLater { logInputState("after send") }
@@ -1055,12 +1275,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         val tab = file.tab
         val ok = when {
-            tab != null && terminalOpen -> SessionTerminals.send(project, tab, text)
+            tab != null && terminalOpen -> if (now) SessionTerminals.sendNow(project, tab, text) else SessionTerminals.send(project, tab, text)
             else -> sessionId?.let { sessions.reply(it, text) } == true
         }
         if (ok) {
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
-            pending += text; input.text = ""; renderTranscript(force = true)
+            pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
         }
         else hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
     }
@@ -1112,10 +1332,52 @@ private class SessionEditor(private val project: Project, private val file: Sess
         when (e.kind) {
             TranscriptEntry.Kind.USER -> html.append("<div class=\"user\">")
                 .append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
-            TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(Md.document(e.text), baseDir()))
+            TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(promptLinks(Md.document(e.text)), baseDir()))
             TranscriptEntry.Kind.TOOL -> html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(e.text)).append("</div>")
-            TranscriptEntry.Kind.NOTE -> html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(e.text)).append("</pre>")
+            // Kurze Rückmeldungen lokaler Befehle ("Compacted", "Interrupted") als graue Statuszeile wie Tool-Zeilen -
+            // als umrandeter Kasten wirkten sie wie ein Eingabefeld; mehrzeilige Ausgaben (/cost, /context) bleiben Kasten.
+            TranscriptEntry.Kind.NOTE -> if ('\n' !in e.text && e.text.length <= 120)
+                html.append("<div class=\"tool\">").append(if (e.text == "Interrupted") "⏹ " else "✓ ")
+                    .append(StringUtil.escapeXmlEntities(e.text)).append("</div>")
+            else html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(e.text)).append("</pre>")
             TranscriptEntry.Kind.SUMMARY -> {}
+        }
+    }
+
+    /**
+     * Slash-Befehle, die Claude vorschlägt (eigener Absatz oder Code-Spanne, die mit einem bekannten Befehl beginnt, z. B.
+     * `/compact Behalte nur …` oder `/session-kuerzen`), als Link mit ↗: Klick übernimmt den Befehl ins Eingabefeld.
+     */
+    private fun promptLinks(html: String): String {
+        val names = SlashCommands.all(project).mapTo(HashSet()) { it.name }
+        fun command(plain: String): String? {
+            val t = plain.trim()
+            val name = SLASH.matchAt(t, 0)?.groupValues?.get(1) ?: return null
+            return t.takeIf { name in names && !t.contains('\n') }
+        }
+        // ▶ führt den Befehl gleich aus, der Befehl samt ↗ übernimmt ihn ins Eingabefeld.
+        fun link(cmd: String, inner: String): String {
+            val enc = java.net.URLEncoder.encode(cmd, Charsets.UTF_8).replace("+", "%20")
+            return "<a href=\"$RUN_LINK$enc\">▶</a>&nbsp;<a href=\"$PROMPT_LINK$enc\">$inner&nbsp;↗</a>"
+        }
+        val paragraphs = PARAGRAPH.replace(html) { m ->
+            val plain = StringUtil.unescapeXmlEntities(m.groupValues[1].replace(TAG, ""))
+            val cmd = command(plain) ?: return@replace m.value
+            "<p>" + link(cmd, StringUtil.escapeXmlEntities(cmd)) + "</p>"
+        }
+        // Codeblöcke: jede Zeile, die ein Befehl ist (z. B. ein ```-Block mit `/rename …`).
+        val blocks = PRE.replace(paragraphs) { m ->
+            m.groupValues[1] + m.groupValues[2].split("\n").joinToString("\n") { line ->
+                command(StringUtil.unescapeXmlEntities(line))?.let { link(it, line.trim()) } ?: line
+            } + "</pre>"
+        }
+        // Code-Spannen außerhalb von Codeblöcken und der eben gesetzten Links.
+        return blocks.split(Regex("(?=<pre)|(?<=</pre>)|(?=<a )|(?<=</a>)")).joinToString("") { part ->
+            if (part.startsWith("<pre") || part.startsWith("<a ")) part
+            else INLINE_CODE.replace(part) { m ->
+                val cmd = command(StringUtil.unescapeXmlEntities(m.groupValues[1])) ?: return@replace m.value
+                link(cmd, m.value)
+            }
         }
     }
 
@@ -1171,12 +1433,26 @@ private class SessionEditor(private val project: Project, private val file: Sess
             pending.removeAll { norm(it) in recent }
         }
         // Swing-HTML kennt nur eine Klasse je Element - grau per innerem span.
+        sentNow.retainAll(pending.toSet())
         for (p in pending) html.append("<div class=\"user\"><span class=\"pending\">").append(StringUtil.escapeXmlEntities(p).replace("\n", "<br>"))
-            .append("<br><i>Queued - Claude reads it after its current step and keeps working on the task with it.</i></span></div>")
+            .append(if (p in sentNow) "<br><i>Sent now - Claude stops its current step and reads it right away.</i></span></div>"
+                else "<br><i>Queued - Claude reads it after its current step (Ctrl+Enter sends right away).</i></span></div>")
+        // Eine Zeile für alle Hintergrund-Aufgaben: Anzahl und die zuletzt gestartete.
+        backgroundTasks().takeIf { it.isNotEmpty() }?.let { tasks ->
+            html.append("<div class=\"tool\">⧗ ").append(if (tasks.size == 1) "Running in the background" else "${tasks.size} tasks running in the background")
+                .append(" · ").append(StringUtil.escapeXmlEntities(StringUtil.shortenTextWithEllipsis(tasks.last(), 100, 0))).append("</div>")
+        }
         html.append("</body></html>")
         val value = bar.value
         pane.text = html.toString()
         if (atEnd) scrollToEnd() else SwingUtilities.invokeLater { bar.value = value }
+    }
+
+    /** Hintergrundaufgaben der Session - nur solange sie läuft (mit ihr enden auch die Aufgaben). */
+    private fun backgroundTasks(): Collection<String> {
+        val id = sessionId ?: return emptyList()
+        if (id !in sessions.infos && !terminalOpen) return emptyList()
+        return transcript?.background?.values?.toList().orEmpty()
     }
 
     /** Kopfzeile, Rückfrage und Eingabe nach dem Zustand der Session; nur neu aufbauen, wenn er sich ändert. */
@@ -1188,7 +1464,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val canSend = terminal || (id != null && sessions.canReply(id))
         // ConcurrentHashMap: `null in set` wirft.
         val wasSent = id != null && id in sessions.sent
-        val key = listOf(id, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent).joinToString("|")
+        val tasks = backgroundTasks().size
+        val key = listOf(id, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks).joinToString("|")
         if (key == stateKey) return
         stateKey = key
 
@@ -1201,7 +1478,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             id == null && terminal -> "Starting Claude…" to UIUtil.getContextHelpForeground()
             else -> "Ready" to UIUtil.getContextHelpForeground()
         }
-        status.text = text
+        status.text = if (tasks > 0 && working == null && !wasSent) "$text · $tasks background task${if (tasks > 1) "s" else ""} running" else text
         status.foreground = color
         val isBusy = working != null || wasSent
         if (file.busy != isBusy) { file.busy = isBusy; updateTabTitle() }
@@ -1264,7 +1541,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         applyEmptyText()
         hint.text = when {
-            terminal -> "Enter sends, Shift+Enter adds a line. Goes to the terminal as if typed, slash commands included."
+            terminal -> "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
             resumable -> "Not running in the IDE terminal. Resume continues it there (claude --resume); only if it is not still open elsewhere."
             id == null && tab == null -> "Session not found."
@@ -1286,7 +1563,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private fun updateSuggestion(id: String?) {
         val tab = file.tab
         val done = sessions.waiting(id)?.finished == true && (id == null || id !in sessions.sent)
-        val s = if (tab != null && done && terminalOpen) SessionTerminals.promptSuggestion(project, tab) else null
+        // Vorangestellte Dateien wie "[offene-datei.md]" (Claude Code hängt die offene Editor-Datei als Kontext an) weglassen -
+        // sie passen selten zum nächsten Prompt.
+        val s = (if (tab != null && done && terminalOpen) SessionTerminals.promptSuggestion(project, tab) else null)
+            ?.replace(Regex("""^(?:\[[^\]\n]+]\s*)+"""), "")?.trim()?.takeIf { it.isNotEmpty() }
         if (s != suggestion) { suggestion = s; applyEmptyText() }
     }
 
@@ -1311,6 +1591,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
         /** Mehr Einträge machen den HTML-Viewer träge; der ganze Verlauf steht im Terminal. */
         private const val MAX_ENTRIES = 300
         private const val STEPS_LINK = "handoff-steps:"
+        private const val PROMPT_LINK = "handoff-prompt:"
+        private const val RUN_LINK = "handoff-run:"
+        private val PRE = Regex("(<pre[^>]*>)(.*?)</pre>", RegexOption.DOT_MATCHES_ALL)
+        private val SLASH = Regex("""/([\w:.-]+)(?=\s|$)""")
+        private val PARAGRAPH = Regex("<p>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
+        private val INLINE_CODE = Regex("<code>([^<]{2,2000})</code>")
+        private val TAG = Regex("<[^>]+>")
     }
 }
 

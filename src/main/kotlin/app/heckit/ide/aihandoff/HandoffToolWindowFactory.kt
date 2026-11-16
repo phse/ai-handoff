@@ -26,6 +26,7 @@ import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JPanel
+import javax.swing.JComponent
 import javax.swing.Scrollable
 import javax.swing.SwingUtilities
 import java.awt.Rectangle
@@ -174,6 +175,16 @@ object Layout {
  * Karten-Liste des Commands-Reiters. [compact]: nur wartende Übergaben (Befehle, Fragen, Reviews, Bilder), ohne Leerzustand,
  * Hinweise und Claude-Nachrichten - für den Session-Reiter ([sessionOf]: dessen Session), damit man dort antworten kann, ohne ins Handoff-Fenster zu wechseln.
  */
+/** Schlüssel der Karten im Handoff-Fenster (Top-Level: in HandoffPanel wären sie beim ersten rebuild() im init noch null). */
+private const val CARD_KEY = "handoff.cardKey"
+private const val CARD_GLUE = "handoff.glue"
+
+/** Hauptknopf einer Karte (Approve, Send, Run …) blau hervorheben - "JButton.buttonType" = "default" wirkt im LaF nicht. */
+internal fun JButton.primary() = com.intellij.ui.ClientProperty.put(this, com.intellij.ide.ui.laf.darcula.ui.DarculaButtonUI.DEFAULT_STYLE_KEY, true)
+
+/** Verwerfen-Knopf schlicht mit Kreuz, damit er sich ohne Lesen vom Hauptknopf unterscheidet. */
+internal fun dismissButton(text: String) = JButton(text, AllIcons.Actions.Close)
+
 internal class HandoffPanel(private val project: Project, private val compact: Boolean = false, private val sessionOf: (() -> String?)? = null, private val onNewCard: (() -> Unit)? = null) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
     private val service = HandoffService.getInstance(project)
     // Folgt der Breite des Fensters, damit Karten (und die Bildreihen darin) umbrechen statt rechts abgeschnitten zu werden.
@@ -240,39 +251,69 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         lastNewest = newest
     }
 
+    /** Schlüssel einer Karte: Ändert er sich, wird sie neu gebaut; sonst bleibt die Komponente samt Fokus und Diktat stehen. */
+    private fun proposalKey(p: Proposal): Any = listOf("p", p.id, p.state, p.page, p.exitCode, p.note, p.chosen, p.selected,
+        p.steps.map { it.exitCode to it.running }, p.marks.mapValues { it.value.size }, p.shapes.keys.toSet(), p.lineNotes)
+
+    /**
+     * [container] auf die Karten [items] (Schlüssel → Bauanleitung) bringen, ohne unveränderte anzufassen: Bisher baute jede
+     * Statusänderung irgendeiner Session die ganze Liste neu - ein laufendes Diktat in einer Karte brach dabei ab (2026-11-16).
+     * Jede Karte steckt in einer Hülle mit 8 px Abstand unten (statt eines eigenen Abstandshalters).
+     */
+    private fun sync(container: JPanel, items: List<Pair<Any, () -> JComponent>>, glue: Boolean) {
+        val current = container.components.filterIsInstance<JComponent>().associateBy { it.getClientProperty(CARD_KEY) }
+        val wanted = items.map { (key, make) ->
+            current[key] ?: object : JPanel(BorderLayout()) {
+                // Höhe der Karte übernehmen (z. B. die begrenzte Befehlskarte) - sonst streckt BoxLayout die Hülle.
+                override fun getMaximumSize(): Dimension = (getComponent(0) as JComponent).maximumSize.let {
+                    Dimension(Int.MAX_VALUE, if (it.height >= Int.MAX_VALUE - JBUI.scale(8)) Int.MAX_VALUE else it.height + JBUI.scale(8))
+                }
+            }.apply {
+                isOpaque = false; alignmentX = LEFT_ALIGNMENT; border = JBUI.Borders.emptyBottom(8)
+                add(make(), BorderLayout.CENTER); putClientProperty(CARD_KEY, key)
+            }
+        } + if (glue) listOf(current[CARD_GLUE] ?: (Box.createVerticalGlue() as JComponent).apply { putClientProperty(CARD_KEY, CARD_GLUE) }) else emptyList()
+        if (container.components.toList() == wanted) return
+        val keep = wanted.toSet()
+        container.components.filter { it !in keep }.forEach { container.remove(it) }
+        wanted.forEachIndexed { i, c -> if (container.componentCount <= i || container.getComponent(i) !== c) container.add(c, i) }
+        container.revalidate(); container.repaint()
+    }
+
     private fun rebuild() {
         if (compact) return rebuildCompact()
-        list.removeAll()
         val notes = NotesService.getInstance(project).all()
         val waiting = project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty()
         val working = project.getServiceIfCreated(WaitingSessions::class.java)?.working.orEmpty()
         val pin = Layout.pinClaudeMessages
         val top = Layout.newestOnTop
-        if (service.proposals.isEmpty() && notes.isEmpty() && ((waiting.isEmpty() && working.isEmpty()) || pin)) list.add(emptyState())
+        fun waitKey(w: WaitingSession): Any = listOf("w", w.id, w.at, w.finished, w.listening, w.text)
+        fun workKey(w: WorkingSession): Any = listOf("k", w.id, w.since, w.prompt)
+        val entries = mutableListOf<Pair<Any, () -> JComponent>>()
+        if (service.proposals.isEmpty() && notes.isEmpty() && ((waiting.isEmpty() && working.isEmpty()) || pin))
+            entries += listOf("empty", Features.missing(project).size, Features.mentioned(project).isEmpty()) to { emptyState() }
         // Chronologisch, Richtung nach Einstellung (Standard: älteste oben, neueste unten wie in einem Chat).
-        val items: List<Pair<Long, () -> JPanel>> =
+        val items: List<Triple<Long, Any, () -> JComponent>> =
             // Die Liste ist neueste zuerst; umgedreht bleibt die Reihenfolge bei gleicher Millisekunde richtig (stabile Sortierung).
-            service.proposals.reversed().map { p -> p.createdAt to { card(p) } } + if (pin) emptyList() else waiting.map { w -> w.at to { waitingCard(w) } } + working.map { w -> w.since to { workingCard(w) } }
+            service.proposals.reversed().map { p -> Triple(p.createdAt, proposalKey(p)) { card(p) } } +
+                if (pin) emptyList() else waiting.map { w -> Triple(w.at, waitKey(w)) { waitingCard(w) } } +
+                    working.map { w -> Triple(w.since, workKey(w)) { workingCard(w) } }
         val sorted = items.sortedBy { it.first }.let { if (top) it.reversed() else it }
         // Notizen ohne wartende Prüfung: eigene Karte, bis Claude sie abholt. Sonst stehen sie in der Prüfkarte.
-        val notesCard = if (notes.isNotEmpty() && service.proposals.none { it.review && it.isPending }) notesCard(notes) else null
-        if (top && notesCard != null) { list.add(notesCard); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
-        sorted.forEach { (_, make) ->
-            list.add(make())
-            list.add(Box.createVerticalStrut(JBUI.scale(8)))
-        }
-        if (!top && notesCard != null) { list.add(notesCard); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
-        list.add(Box.createVerticalGlue())
-        list.revalidate()
-        list.repaint()
+        val notesEntry: Pair<Any, () -> JComponent>? = if (notes.isNotEmpty() && service.proposals.none { it.review && it.isPending })
+            listOf("n", notes.map { it.text to it.highlighter.startOffset }) to { notesCard(notes) } else null
+        if (top && notesEntry != null) entries += notesEntry
+        sorted.forEach { (_, key, make) -> entries += key to make }
+        if (!top && notesEntry != null) entries += notesEntry
+        sync(list, entries, glue = true)
 
-        pinned.removeAll()
-        if (pin) (waiting.map { it.at to { waitingCard(it) } } + working.map { it.since to { workingCard(it) } })
-            .sortedBy { it.first }.let { if (top) it.reversed() else it }.forEach { (_, make) ->
-                pinned.add(make()); pinned.add(Box.createVerticalStrut(JBUI.scale(8)))
-            }
-        pinnedScroll.isVisible = pinned.componentCount > 0
-        pinned.revalidate(); pinned.repaint(); revalidate()
+        val pinnedItems = if (pin) (waiting.map { Triple(it.at, waitKey(it)) { waitingCard(it) as JComponent } } +
+            working.map { Triple(it.since, workKey(it)) { workingCard(it) as JComponent } })
+            .sortedBy { it.first }.let { if (top) it.reversed() else it }.map { it.second to it.third } else emptyList()
+        sync(pinned, pinnedItems, glue = false)
+        val show = pinned.componentCount > 0
+        if (pinnedScroll.isVisible != show) { pinnedScroll.isVisible = show; revalidate() }
+        if (show) pinnedScroll.revalidate()
 
         // Neue Karte: dorthin scrollen, wo die neuesten stehen.
         val newest = items.maxOfOrNull { it.first } ?: 0L
@@ -470,8 +511,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 toolTipText = "A note in the field below turns an approval into a change request"
                 addActionListener { service.finishReview(p, note.text) }
             }
-            finish.putClientProperty("JButton.buttonType", "default")
-            val dismiss = JButton("Dismiss").apply {
+            finish.primary()
+            val dismiss = dismissButton("Dismiss").apply {
                 toolTipText = "Skip the review; line notes stay"
                 addActionListener { service.dismiss(p, note.text) }
             }
@@ -517,7 +558,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             val base = project.basePath.orEmpty().trimEnd('/')
             if (s.cwd != base) add(grey(if (s.cwd.startsWith("$base/")) s.cwd.removePrefix("$base/") else SessionEditors.shortPath(s.cwd)))
         }, BorderLayout.CENTER)
-        val dismiss = JButton("Dismiss").apply { addActionListener { sessions.dismiss(s) } }
+        val dismiss = dismissButton("Dismiss").apply { addActionListener { sessions.dismiss(s) } }
         if (s.id in sessions.sent) {
             card.add(JPanel(BorderLayout()).apply {
                 isOpaque = false
@@ -534,7 +575,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 })
             }
             val send = JButton("Send").apply {
-                putClientProperty("JButton.buttonType", "default")
+                primary()
                 addActionListener { send(s, input) }
             }
             input.inputMap.put(javax.swing.KeyStroke.getKeyStroke("ENTER"), "handoff.send")
@@ -588,7 +629,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         }, BorderLayout.CENTER)
         card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
             isOpaque = false
-            add(JButton("Dismiss").apply { toolTipText = "Hide this card; Claude keeps working"; addActionListener { sessions.dismiss(w) } })
+            add(dismissButton("Dismiss").apply { toolTipText = "Hide this card; Claude keeps working"; addActionListener { sessions.dismiss(w) } })
         }, BorderLayout.SOUTH)
         return card
     }
@@ -631,7 +672,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val q = p.questions[p.page.coerceIn(0, n - 1)]
         val last = p.page >= n - 1
         val own = JBTextField(q.own).apply { emptyText.text = "Own answer (optional)" }
-        val next = JButton(if (last) "Submit" else "Next").apply { putClientProperty("JButton.buttonType", "default") }
+        val next = JButton(if (last) "Submit" else "Next").apply { primary() }
         fun updateNext() { next.isEnabled = q.answered }
         body.add(markdown(q.question + if (q.multiSelect) "\n\n*Pick any.*" else ""))
         if (q.question.lines().size > 12) body.add(link("Open in Editor") { Md.openMessage(project, "Question " + time.format(Date(p.createdAt)), q.question) })
@@ -665,7 +706,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         updateNext()
         val back = JButton("Back").apply { isVisible = p.page > 0; addActionListener { p.page--; service.fireChanged() } }
         // Frage von Claude Code selbst: ablehnen heißt, sie im Terminal zu beantworten (der Hook gibt sie frei).
-        val dismiss = JButton(if (p.askSession != null) "Answer in Terminal" else "Dismiss").apply { addActionListener { service.dismiss(p, own.text) } }
+        val dismiss = dismissButton(if (p.askSession != null) "Answer in Terminal" else "Dismiss").apply { addActionListener { service.dismiss(p, own.text) } }
         card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             isOpaque = false
             add(Dictation.withMic(own), BorderLayout.NORTH)
@@ -748,12 +789,12 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 toolTipText = "Runs the steps one after another in the Run tool window and stops at the first one that fails"
                 addActionListener { start(true) }
             }
-            all.putClientProperty("JButton.buttonType", "default")
+            all.primary()
             val one = JButton("Run Step ${next + 1}").apply {
                 toolTipText = "Runs only the next step"
                 addActionListener { start(false) }
             }
-            val dismiss = JButton("Dismiss…").apply {
+            val dismiss = dismissButton("Dismiss…").apply {
                 addActionListener {
                     val note = Messages.showInputDialog(project, "Optional note for Claude:", "Dismiss Commands", null)
                     if (note != null) service.dismiss(p, note)
@@ -823,8 +864,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 toolTipText = "Runs in the Run tool window (type into it if the command asks for input); output goes back to Claude"
                 addActionListener { start(CommandRunner::run) }
             }
-            run.putClientProperty("JButton.buttonType", "default")
-            val dismiss = JButton("Dismiss…").apply {
+            run.primary()
+            val dismiss = dismissButton("Dismiss…").apply {
                 addActionListener {
                     val note = Messages.showInputDialog(project, "Optional note for Claude:", "Dismiss Command", null)
                     if (note != null) service.dismiss(p, note)
@@ -835,7 +876,16 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 listOf(run, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
             }, BorderLayout.SOUTH)
         }
+        // Höhe begrenzen (sonst streckt die Liste die Karte), aber nach jeder Breitenänderung neu: Der umbrechende Befehl wird
+        // erst mit der echten Breite so hoch, wie er ist - die Höhe beim Aufbau schnitt lange Befehle ab (2026-11-16).
         card.maximumSize = Dimension(Int.MAX_VALUE, card.preferredSize.height)
+        card.addComponentListener(object : java.awt.event.ComponentAdapter() {
+            // Erst nach dem Auslegen der Kinder (dann kennt das Textfeld seine Breite) - deshalb per invokeLater.
+            override fun componentResized(e: java.awt.event.ComponentEvent) = javax.swing.SwingUtilities.invokeLater {
+                val h = card.preferredSize.height
+                if (card.maximumSize.height != h) { card.maximumSize = Dimension(Int.MAX_VALUE, h); card.parent?.revalidate() }
+            }
+        })
         return card
     }
 
@@ -862,9 +912,14 @@ internal class HandoffPanel(private val project: Project, private val compact: B
 
     private fun viewer(p: Proposal, i: Int) {
         val editable = p.state == Proposal.State.PENDING
-        val dialog = MarkupDialog(project, p.images, i, HashMap(p.marks), editable)
+        val dialog = MarkupDialog(project, p.images, i, HashMap(p.marks), editable, HashMap(p.shapes))
         if (dialog.showAndGet() && editable) {
             dialog.allMarks.forEach { (k, v) -> if (v.isEmpty()) p.marks.remove(k) else p.marks[k] = v.toList() }
+            dialog.allShapes.forEach { (k, v) ->
+                if (v == p.shapes[k].orEmpty()) return@forEach
+                if (v.isEmpty()) { p.shapes.remove(k); p.drawn.remove(k) }
+                else { p.shapes[k] = v.map { it.copy() }; Drawing.save(p.images[k], v)?.let { p.drawn[k] = it } }
+            }
             rebuild()
         }
     }
@@ -903,7 +958,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val tiles = p.images.mapIndexed { i, path ->
             val name = File(path).name
             val count = p.marks[i]?.size ?: 0
-            val caption = (if (single) name else "${i + 1} · $name") + (if (count > 0) " · $count marked" else "")
+            val caption = (if (single) name else "${i + 1} · $name") + (if (count > 0) " · $count marked" else "") +
+                (if (!p.shapes[i].isNullOrEmpty()) " · drawn" else "")
             val label = JBLabel(caption, thumb(path), JBLabel.CENTER).apply {
                 verticalTextPosition = JBLabel.BOTTOM; horizontalTextPosition = JBLabel.CENTER
                 font = JBUI.Fonts.smallFont()
@@ -987,9 +1043,9 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 })
             }
             choose.isEnabled = p.selected != null
-            choose.putClientProperty("JButton.buttonType", "default")
+            choose.primary()
             choose.addActionListener { p.selected?.let { service.choose(p, it, note.text) } }
-            val dismiss = JButton("Dismiss").apply { addActionListener { service.dismiss(p, note.text) } }
+            val dismiss = dismissButton("Dismiss").apply { addActionListener { service.dismiss(p, note.text) } }
             card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
                 isOpaque = false
                 add(Dictation.withMic(note), BorderLayout.NORTH)

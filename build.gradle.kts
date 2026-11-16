@@ -69,6 +69,29 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.6.0</h3>
+            <ul>
+              <li><b>Draw on images</b>: a pen, an arrow and a double arrow in the image viewer, with six colors and three line widths
+                  (⌘Z undoes the last drawing).
+                  Claude gets a copy of the image with your drawing on top; marks stay separate as areas with notes.</li>
+              <li>Session tab: <b>Ctrl+Enter</b> (or Cmd+Enter) sends right away while Claude works, like in the terminal.</li>
+              <li>Slash commands Claude suggests become links, also in code blocks: <b>▶</b> runs one, a click on it puts it into
+                  the prompt field.</li>
+              <li>Type <code>@</code> in the prompt field to pass a file as context: open files first, from two letters on
+                  also files from the whole project; the slash list works in
+                  the middle of a prompt too and stays next to what you type.</li>
+              <li>Dropped and pasted files show short as <i>[Image #1]</i> and act like one character; hover shows path and preview.</li>
+              <li>Commands Claude runs in the background show as one grey line in the conversation and in the header until they end.</li>
+              <li>The suggested next prompt no longer starts with the name of the file open in the editor.</li>
+              <li>Sessions started from Handoff are told to hand over commands, questions and reviews as cards.</li>
+              <li>Cards: the main button (Approve, Send, Run, Choose) is highlighted, Dismiss has a cross - no need to read them.</li>
+              <li>Short replies of local commands like <i>Compacted</i> show as a grey line instead of a box.</li>
+              <li>The session tab takes the name set with <code>/rename</code>; ▶ shows the command right away; the slash list
+                  shrinks while you type; the caret stays visible next to the grey suggestion.</li>
+              <li>Fixes: local commands like <code>/rename</code> no longer stay "Queued"; long commands are no longer cut off in
+                  their card; a link to a folder selects it in the Project view (or shows it in Finder) instead of
+                  opening the browser; dictation in a card of the Handoff tool window no longer stops when another session changes state.</li>
+            </ul>
             <h3>1.5.2</h3>
             <ul>
               <li>Cards show only in the session tab they belong to - a question from another session no longer appears in the open tab;

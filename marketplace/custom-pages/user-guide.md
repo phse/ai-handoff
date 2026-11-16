@@ -47,6 +47,8 @@ If the MCP tools handoff_* are available, use them:
 - Link what I should open, as Markdown links: files as [name](/abs/path:line),
   settings as [MCP Server](settings:MCP%20Server), IDE actions as
   [Find Action](action:GotoAction). The Handoff session tab opens them in the IDE.
+- Slash commands for me (/compact with instructions, skills): put each on its own
+  line or in backticks. The session tab offers them as a prompt with one click.
 ```
 
 ## The Commands tab
@@ -122,6 +124,12 @@ and wait with handoff_wait_for_result.
 One image to approve, or several variants to pick one. The eye icon opens a viewer with zoom and paging (← →), where you
 mark areas with a frame and a note for Claude: drag on a free spot to draw a frame, click a frame to select it (drag its
 corners to resize, its number to move it).
+
+The pen in the viewer's toolbar draws freehand lines instead: pick a color (red, yellow, green, blue, black, white) and a
+line width (thin, medium, thick). The arrow and double arrow next to it point at something: drag from the tail to the
+tip. ⌘Z takes back the last drawing, the trash icon removes all drawings on the image, Esc goes
+back to marking. Claude gets a copy of the image with your drawing on top (the original stays unchanged); marks are not
+part of that copy, they still go as areas with notes. Images you mark in the session tab's prompt work the same way.
 
 **Tools:** `handoff_show_images`, `handoff_wait_for_result`.
 
@@ -208,13 +216,14 @@ in a terminal tab in the background and opens the session in an editor tab:
   session.
 - `/resume ` (with a space) lists the project's earlier sessions by title and time; pick one to get `/resume <id>`.
 - Type `/` in the prompt field: a list suggests slash commands (built-in ones, your commands and skills, those of your
-  plugins). **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes. Only where slash commands reach the session.
+  plugins), also in the middle of a prompt after a space. **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes
+  it for this `/`; a space or letters that match no command close it too. Only where slash commands reach the session.
 - When Claude asks a question with options (Claude Code's own *AskUserQuestion*), it shows as a card at the end of the
   conversation (and in the Handoff tool window): pick, add your own answer, **Submit** - Claude gets the answer right away.
   **Answer in Terminal** lets Claude Code show its own dialog in the terminal instead. Works for sessions in a Handoff tab
   while the IDE runs.
 - After an answer, Claude Code often suggests the next prompt. It shows grey in the empty prompt field; **Tab** takes it,
-  typing anything else replaces it.
+  typing anything else replaces it. A file name in brackets in front of it (the file open in the editor) is left out.
 - The editor tab shows a spinner while Claude works and the Handoff icon once it is done - visible even while you
   work in another tab.
 - A **●** in front of the tab title shows that the session waits for you (a card, a permission or a question in the
@@ -226,7 +235,13 @@ in a terminal tab in the background and opens the session in an editor tab:
 - The **/** button above **Send** lists all slash commands with a short description; type to filter. **Run** (Enter,
   double-click) sends the command right away, **Insert** (Tab) puts it at the cursor in your prompt.
 - While Claude works, a spinner below the last prompt shows it. A prompt you send meanwhile shows grey as *Queued*:
-  Claude reads it after its current step and keeps working on the task with it (it does not stop).
+  Claude reads it after its current step and keeps working on the task with it (it does not stop). **Ctrl+Enter** (or
+  **Cmd+Enter**) sends it right away instead, like in the terminal: Claude stops its current step and answers at once.
+- Commands Claude runs in the background show as a grey line *Running in the background* below the last message, and
+  the header counts them (*1 background task running*). When one ends, Claude reports back by itself.
+- Slash commands Claude suggests (on their own line or in backticks, e.g. `/compact …` or a skill) become links, also
+  lines in code blocks: **▶** runs the command right away, a click on the command (with ↗) puts it into the prompt
+  field without sending it.
 - The header shows your plan limits (5 hours, week; reset times as tooltip) and, for the session that last updated the
   status line, model and context use. Needs **Show Plan Limits…** from the Usage tab to be set up.
 - Links in Claude's messages open in the IDE: file paths (absolute or relative, with `:line`), also file names in
@@ -236,8 +251,12 @@ in a terminal tab in the background and opens the session in an editor tab:
   exactly one matches - single words only for settings pages, so a bold **Run** never runs anything. Sessions started from
   Handoff are told at start to link as much as possible (action ids via `search_ide_actions`) and to show images with
   `handoff_show_images` instead of opening them in another app.
-- Drop image files onto the prompt field, or paste a screenshot (⌘V): the prompt gets the file path, and Claude reads
-  the image. Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
+- Type `@` in the prompt field (also mid-prompt): a list shows the files open in the editor, the current one first; typing
+  filters. From two typed letters on, matching files from the whole project follow below the open ones. The chosen file shows short as *[@name.md #1]* and goes to Claude as an `@path` mention, so Claude reads it.
+  Use it to give a file as context on purpose.
+- Drop image files onto the prompt field, or paste a screenshot (⌘V): the field shows them short as *[Image #1]* (other
+  files as *[File #2: name]*), Claude gets the file path and reads the image. A short name acts like one character:
+  Backspace removes it whole, the cursor skips over it, and hovering it shows the path (and a preview for images). Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
   draw frames with a note each, and the prompt gets them as pixel areas with the notes. Opening it again shows the frames
   from the prompt, and saving replaces them.
 - Waiting Handoff cards (commands to run, questions, reviews, images) show at the end of the conversation too, so you

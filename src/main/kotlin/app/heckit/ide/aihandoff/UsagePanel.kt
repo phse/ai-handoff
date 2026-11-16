@@ -216,16 +216,18 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
         val callIds = HashSet<String>()
         var title: String? = null
         var firstPrompt: String? = null
+        var custom = false
         f.bufferedReader().useLines { lines ->
             for (line in lines) {
                 // Schneller Vorfilter: nur Zeilen mit Verbrauch, Titel oder (für den Ersatztitel) die erste Eingabe.
                 val isUsage = line.contains("\"usage\"")
-                val isTitle = line.contains("\"ai-title\"")
+                val isTitle = line.contains("\"ai-title\"") || line.contains("\"custom-title\"")
                 val isPrompt = firstPrompt == null && line.contains("\"type\":\"user\"")
                 if (!isUsage && !isTitle && !isPrompt) continue
                 val o = runCatching { JsonParser.parseString(line).asJsonObject }.getOrNull() ?: continue
                 when (o.str("type")) {
-                    "ai-title" -> title = o.str("aiTitle") ?: title
+                    "ai-title" -> if (!custom) title = o.str("aiTitle") ?: title
+                    "custom-title" -> o.str("customTitle")?.let { title = it; custom = true }
                     "user" -> if (firstPrompt == null) {
                         val c = o.getAsJsonObject("message")?.get("content")
                         if (c != null && c.isJsonPrimitive) firstPrompt = c.asString.lineSequence().firstOrNull { it.isNotBlank() }?.trim()

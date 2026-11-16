@@ -32,7 +32,7 @@
   <li><b>Questions with options</b>: Claude asks as a card, one answer or several, plus your own answer.</li>
   <li><b>Notifications</b> when something is waiting while the IDE is in the background.</li>
   <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging
-      lets you mark areas with a frame and a note for Claude, right on the image.</li>
+      lets you mark areas with a frame and a note for Claude, or draw on the image with a pen or arrows.</li>
   <li><b>Memory</b>: everything Claude Code loads into each session (CLAUDE.md files, imports, project memory) as a tree with token
       estimates per file and section, warnings for memories missing from the index, on-demand files and duplicated paragraphs.</li>
   <li><b>Usage</b>: tokens per day and session for the project, and optionally your 5-hour and weekly plan limits.</li>

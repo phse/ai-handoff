@@ -146,6 +146,7 @@ class HandoffToolset : McpToolset {
         |Shows images to the user in the IDE's Handoff tool window and asks a question about them: one image to review
         |(the user approves it or dismisses it with a note and can mark areas on it), or several variants to choose from (e.g. icon or layout
         |proposals). Prefer this over opening comparison images. Returns an id; call handoff_wait_for_result with it.
+        |If the user drew on an image, the result names a copy with the drawing on top - read that file to see it.
         """
     )
     suspend fun handoff_show_images(

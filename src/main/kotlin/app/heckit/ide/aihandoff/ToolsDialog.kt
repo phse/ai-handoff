@@ -77,6 +77,8 @@ class ToolsDialog(private val project: Project, private val calls: Map<String, I
     private val applyAction = object : AbstractAction("Apply") {
         override fun actionPerformed(e: ActionEvent) {
             Permissions.setDenied(groups.filter { !allowed.getValue(it).isSelected }.flatMap { it.tools }.toSet(), tools.toSet())
+            // Der Start-Hinweis nennt nur erlaubte Werkzeuge - Hook-Skript neu schreiben.
+            runCatching { WaitingHook.upgradeIfNeeded() }
             prompt()?.let { p ->
                 val s = target
                 if (s != null) WaitingSessions.getInstance(project).reply(s.id, p)

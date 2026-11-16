@@ -45,6 +45,7 @@ class MarkupDialog(
     start: Int,
     initial: Map<Int, List<Mark>>,
     private val editable: Boolean,
+    initialShapes: Map<Int, List<Shape>> = emptyMap(),
 ) : DialogWrapper(project) {
 
     /** Rahmen je Bild (Index in [paths]). */
@@ -52,6 +53,18 @@ class MarkupDialog(
         paths.indices.associateWith { i -> initial[i].orEmpty().map { it.copy() }.toMutableList() }.toMutableMap()
     /** Stand beim Öffnen - "Save" nur, wenn sich davon etwas unterscheidet. */
     private val original: Map<Int, List<Mark>> = allMarks.mapValues { (_, l) -> l.map { it.copy() } }
+    /** Zeichnungen je Bild (Index in [paths]) - gehen als Bildkopie an Claude, nicht als Mark. */
+    val allShapes: MutableMap<Int, MutableList<Shape>> =
+        paths.indices.associateWith { i -> initialShapes[i].orEmpty().map { it.copy() }.toMutableList() }.toMutableMap()
+    private val originalShapes: Map<Int, List<Shape>> = allShapes.mapValues { (_, l) -> l.map { it.copy() } }
+    private val shapes: MutableList<Shape> get() = allShapes.getValue(index)
+    private fun changed() = allMarks != original || allShapes != originalShapes
+    /** Gewähltes Werkzeug: null = Bereiche markieren (Standard), sonst eine Zeichenart. */
+    private var tool: ShapeKind? = null
+    private var color = Drawing.COLORS[0].second
+    private var strokeWidth = Drawing.WIDTHS[1].second
+    /** Strich, der gerade gezogen wird. */
+    private var drawing: Shape? = null
     private var index = start
     /** Stift-Werkzeug: für genau einen neuen Rahmen; endet nach dem Ziehen oder per Esc. */
     private var markMode = false
@@ -114,6 +127,15 @@ class MarkupDialog(
 
                 override fun mousePressed(e: MouseEvent) {
                     requestFocusInWindow()
+                    if (tool != null && editable) {
+                        selected = null
+                        val p = imagePoint(e.point)
+                        // Strichstärke wie auf dem Bildschirm gezeigt, gespeichert in Bildpixeln (folgt dem Zoom).
+                        drawing = Shape(tool!!, color, (com.intellij.ui.scale.JBUIScale.scale(strokeWidth) / scale).toFloat(),
+                            mutableListOf(java.awt.geom.Point2D.Float((p.x / scale).toFloat(), (p.y / scale).toFloat())))
+                        shapes.add(drawing!!)
+                        repaint(); return
+                    }
                     if (markMode) { dragStart = imagePoint(e.point); dragNow = dragStart; return }
                     if (!editable) return
                     val hit = hitTest(e.point)
@@ -127,6 +149,7 @@ class MarkupDialog(
                     repaint()
                 }
                 override fun mouseMoved(e: MouseEvent) {
+                    if (tool != null && editable) { cursor = Cursor.getPredefinedCursor(Cursor.CROSSHAIR_CURSOR); return }
                     if (markMode || !editable) return
                     val hit = hitTest(e.point)
                     cursor = Cursor.getPredefinedCursor(when (hit?.second) {
@@ -137,6 +160,15 @@ class MarkupDialog(
                     })
                 }
                 override fun mouseDragged(e: MouseEvent) {
+                    drawing?.let { d ->
+                        val p = imagePoint(e.point)
+                        val q = java.awt.geom.Point2D.Float((p.x / scale).toFloat(), (p.y / scale).toFloat())
+                        // Pfeile: nur Anfang und Ende - das Ende folgt der Maus.
+                        if (d.kind != ShapeKind.PEN) { if (d.points.size > 1) d.points[1] = q else d.points.add(q); repaint(); return }
+                        val last = d.points.last()
+                        if (abs(last.x - q.x) * scale >= 1 || abs(last.y - q.y) * scale >= 1) { d.points.add(q); repaint() }
+                        return
+                    }
                     val a = dragStart
                     if (a == null) {
                         val g = grab ?: return; val s0 = startMark ?: return; val i = selected ?: return
@@ -168,6 +200,11 @@ class MarkupDialog(
                     repaint(area.x + o.x - pad, area.y + o.y - pad, area.width + 2 * pad, area.height + 2 * pad)
                 }
                 override fun mouseReleased(e: MouseEvent) {
+                    if (drawing != null) {
+                        // Pfeil ohne Ziehen (nur geklickt) ergibt nichts Sichtbares - verwerfen statt als leere Zeichnung zählen.
+                        drawing?.takeIf { it.kind != ShapeKind.PEN && it.points.size < 2 }?.let { shapes.remove(it); repaint() }
+                        drawing = null; updateOkText(); return
+                    }
                     if (grab != null) { grab = null; startMark = null; updateOkText(); return }
                     val a = dragStart ?: return
                     val b = imagePoint(e.point)
@@ -246,6 +283,7 @@ class MarkupDialog(
             val o = origin()
             g2.translate(o.x, o.y)
             g2.drawImage(scaledImage((image.width * scale).roundToInt(), (image.height * scale).roundToInt()), 0, 0, null)
+            shapes.forEach { Drawing.paint(g2, it, scale) }
             g2.stroke = BasicStroke(JBUI.scale(2).toFloat())
             marks.forEachIndexed { i, m ->
                 val r = Rectangle((m.x * scale).roundToInt(), (m.y * scale).roundToInt(), (m.w * scale).roundToInt(), (m.h * scale).roundToInt())
@@ -434,7 +472,8 @@ class MarkupDialog(
 
     /** "Save" nur bei Änderungen gegenüber dem Stand beim Öffnen, sonst "Close". */
     private fun updateOkText() {
-        setOKButtonText(if (editable && allMarks != original) "Save" else "Close")
+        setOKButtonText(if (editable && changed()) "Save" else "Close")
+        undo.isEnabled = shapes.isNotEmpty(); clear.isEnabled = shapes.isNotEmpty()
     }
 
     // Aktives Werkzeug deutlich gedrückt zeigen - der LaF zeichnet einen gewählten Umschaltknopf kaum anders.
@@ -472,6 +511,115 @@ class MarkupDialog(
         canvas.cursor = Cursor.getDefaultCursor()
     }
 
+    /** Umschaltknopf mit deutlich gezeichnetem Gewählt-Zustand (der LaF zeigt ihn kaum). */
+    private open inner class ToolToggle(icon: javax.swing.Icon?, tip: String) : javax.swing.JToggleButton(icon) {
+        init { toolTipText = tip; isFocusable = false }
+        override fun paintComponent(g: Graphics) {
+            super.paintComponent(g)
+            if (!isSelected) return
+            val g2 = g.create() as Graphics2D
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g2.color = JBUI.CurrentTheme.Focus.focusColor().let { java.awt.Color(it.red, it.green, it.blue, 70) }
+            val arc = JBUI.scale(8)
+            g2.fillRoundRect(JBUI.scale(2), JBUI.scale(2), width - JBUI.scale(4), height - JBUI.scale(4), arc, arc)
+            g2.color = JBUI.CurrentTheme.Focus.focusColor()
+            g2.drawRoundRect(JBUI.scale(2), JBUI.scale(2), width - JBUI.scale(4) - 1, height - JBUI.scale(4) - 1, arc, arc)
+            g2.dispose()
+        }
+    }
+
+    /** Icon "Rechteck" für das Markier-Werkzeug. */
+    private val markIcon = object : javax.swing.Icon {
+        override fun getIconWidth() = JBUI.scale(16)
+        override fun getIconHeight() = JBUI.scale(16)
+        override fun paintIcon(c: java.awt.Component?, g: Graphics, x: Int, y: Int) {
+            val g2 = g.create() as Graphics2D
+            g2.color = UIUtil.getLabelForeground(); g2.stroke = BasicStroke(com.intellij.ui.scale.JBUIScale.scale(1.5f))
+            g2.drawRect(x + JBUI.scale(2), y + JBUI.scale(3), JBUI.scale(12), JBUI.scale(10))
+            g2.dispose()
+        }
+    }
+
+    private val markTool = ToolToggle(markIcon, "Mark areas with a note (drag on the image)").apply { addActionListener { selectTool(null) } }
+    private val penTool = ToolToggle(AllIcons.Actions.Edit, "Pen: draw on the image (Esc back to marking)").apply { addActionListener { selectTool(ShapeKind.PEN) } }
+
+    /** Pfeil-Icon für die Werkzeugleiste, mit Spitze an einem oder beiden Enden. */
+    private fun arrowIcon(double: Boolean) = object : javax.swing.Icon {
+        override fun getIconWidth() = JBUI.scale(16)
+        override fun getIconHeight() = JBUI.scale(16)
+        override fun paintIcon(c: java.awt.Component?, g: Graphics, x: Int, y: Int) {
+            val g2 = g.create() as Graphics2D
+            g2.translate(x, y)
+            Drawing.paint(g2, Shape(if (double) ShapeKind.DOUBLE_ARROW else ShapeKind.ARROW, UIUtil.getLabelForeground(), 1.5f,
+                mutableListOf(java.awt.geom.Point2D.Float(2f, 14f), java.awt.geom.Point2D.Float(14f, 2f))), com.intellij.ui.scale.JBUIScale.scale(1f).toDouble())
+            g2.dispose()
+        }
+    }
+    private val arrowTool = ToolToggle(arrowIcon(false), "Arrow: drag from the tail to the tip (Esc back to marking)").apply { addActionListener { selectTool(ShapeKind.ARROW) } }
+    private val doubleArrowTool = ToolToggle(arrowIcon(true), "Double arrow: drag from one end to the other (Esc back to marking)").apply { addActionListener { selectTool(ShapeKind.DOUBLE_ARROW) } }
+
+    /** Farb- oder Stärkenwahl: kleiner Knopf, der sein Muster selbst zeichnet. */
+    private inner class Swatch(tip: String, private val paintIt: (Graphics2D, Int, Int) -> Unit, private val isOn: () -> Boolean, onClick: () -> Unit) : JComponent() {
+        init {
+            toolTipText = tip; cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            preferredSize = Dimension(JBUI.scale(22), JBUI.scale(22))
+            addMouseListener(object : MouseAdapter() { override fun mouseClicked(e: MouseEvent) { onClick(); swatches.forEach { it.repaint() } } })
+        }
+        override fun paintComponent(g: Graphics) {
+            val g2 = g.create() as Graphics2D
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            if (isOn()) {
+                g2.color = JBUI.CurrentTheme.Focus.focusColor(); g2.stroke = BasicStroke(com.intellij.ui.scale.JBUIScale.scale(2f))
+                g2.drawRoundRect(JBUI.scale(1), JBUI.scale(1), width - JBUI.scale(3), height - JBUI.scale(3), JBUI.scale(6), JBUI.scale(6))
+            }
+            paintIt(g2, width / 2, height / 2)
+            g2.dispose()
+        }
+    }
+
+    private val swatches = mutableListOf<Swatch>()
+    private val colorSwatches = Drawing.COLORS.map { (name, c) ->
+        Swatch(name, { g, cx, cy ->
+            val r = JBUI.scale(7)
+            g.color = c; g.fillOval(cx - r, cy - r, 2 * r, 2 * r)
+            g.color = JBColor.border(); g.stroke = BasicStroke(1f); g.drawOval(cx - r, cy - r, 2 * r, 2 * r)
+        }, { color == c }, { color = c; selectTool(tool ?: ShapeKind.PEN) }).also { swatches += it }
+    }
+    private val widthSwatches = Drawing.WIDTHS.map { (name, w) ->
+        Swatch("$name line", { g, cx, cy ->
+            val d = com.intellij.ui.scale.JBUIScale.scale(w).roundToInt().coerceAtLeast(2)
+            g.color = UIUtil.getLabelForeground(); g.fillOval(cx - d / 2, cy - d / 2, d, d)
+        }, { strokeWidth == w }, { strokeWidth = w; selectTool(tool ?: ShapeKind.PEN) }).also { swatches += it }
+    }
+    private val undo = JButton(AllIcons.Actions.Undo).apply { toolTipText = "Undo the last drawing (⌘Z)"; isFocusable = false; addActionListener { undoShape() } }
+    private val clear = JButton(AllIcons.Actions.GC).apply {
+        toolTipText = "Remove all drawings on this image"; isFocusable = false
+        addActionListener { shapes.clear(); updateOkText(); canvas.repaint() }
+    }
+    /** Farbe und Stärke nur zeigen, solange gezeichnet wird. */
+    private val penOptions = JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, JBUI.scale(2), 0)).apply {
+        add(javax.swing.Box.createHorizontalStrut(JBUI.scale(6)))
+        colorSwatches.forEach { add(it) }
+        add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8)))
+        widthSwatches.forEach { add(it) }
+    }
+
+    private fun selectTool(kind: ShapeKind?) {
+        tool = kind
+        markTool.isSelected = kind == null; penTool.isSelected = kind == ShapeKind.PEN
+        arrowTool.isSelected = kind == ShapeKind.ARROW; doubleArrowTool.isSelected = kind == ShapeKind.DOUBLE_ARROW
+        penOptions.isVisible = kind != null
+        if (kind != null) { selected = null; endMarkMode() }
+        canvas.cursor = Cursor.getPredefinedCursor(if (kind != null) Cursor.CROSSHAIR_CURSOR else Cursor.DEFAULT_CURSOR)
+        swatches.forEach { it.repaint() }
+        canvas.repaint(); canvas.requestFocusInWindow()
+    }
+
+    private fun undoShape() {
+        if (shapes.isEmpty()) return
+        shapes.removeAt(shapes.lastIndex); updateOkText(); canvas.repaint()
+    }
+
     private val canvasScroll = JBScrollPane(canvas).apply { border = JBUI.Borders.customLine(JBColor.border()) }
 
     private fun zoomButton(icon: javax.swing.Icon, tip: String, action: () -> Unit) = JButton(icon).apply {
@@ -507,11 +655,17 @@ class MarkupDialog(
 
     init {
         init()
+        selectTool(null)
         showCurrent()
         // Pfeiltasten per KeyEventDispatcher: Eine Belegung am rootPane kam nicht an, weil die Scrollpane um das Bild
         // ← → selbst belegt. Steht der Fokus in einem Textfeld, bleiben die Tasten beim Cursor.
         val arrows = java.awt.KeyEventDispatcher { e ->
             val owner = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner
+            // ⌘Z / Ctrl+Z: letzten Strich zurücknehmen (nicht im Notizfeld - dort gilt das Rückgängig des Felds).
+            if (e.id == java.awt.event.KeyEvent.KEY_PRESSED && e.keyCode == java.awt.event.KeyEvent.VK_Z && editable &&
+                (e.modifiersEx == java.awt.event.InputEvent.META_DOWN_MASK || e.modifiersEx == java.awt.event.InputEvent.CTRL_DOWN_MASK) &&
+                owner != null && owner !is javax.swing.text.JTextComponent && javax.swing.SwingUtilities.getWindowAncestor(owner) == window
+            ) { undoShape(); return@KeyEventDispatcher true }
             if (e.id != java.awt.event.KeyEvent.KEY_PRESSED || e.modifiersEx != 0 || owner == null ||
                 javax.swing.SwingUtilities.getWindowAncestor(owner) != window
             ) return@KeyEventDispatcher false
@@ -522,7 +676,7 @@ class MarkupDialog(
                 canvas.requestFocusInWindow(); return@KeyEventDispatcher true
             }
             when (e.keyCode) {
-                java.awt.event.KeyEvent.VK_ESCAPE -> if (markMode) { endMarkMode(); true }
+                java.awt.event.KeyEvent.VK_ESCAPE -> if (tool != null) { selectTool(null); true } else if (markMode) { endMarkMode(); true }
                     else if (selected != null) { selected = null; canvas.repaint(); true } else false
                 java.awt.event.KeyEvent.VK_DELETE, java.awt.event.KeyEvent.VK_BACK_SPACE -> selected?.let { i ->
                     if (!editable) return@let false
@@ -548,9 +702,9 @@ class MarkupDialog(
 
     /** Esc/Cancel mit ungespeicherten Änderungen: nachfragen (Speichern / Verwerfen / Abbrechen). */
     override fun doCancelAction() {
-        if (!editable || allMarks == original) return super.doCancelAction()
+        if (!editable || !changed()) return super.doCancelAction()
         when (com.intellij.openapi.ui.Messages.showYesNoCancelDialog(
-            contentPane, "Save the changes to the marks?", "Unsaved Changes", "Save", "Discard", "Cancel",
+            contentPane, "Save the changes to the marks and drawings?", "Unsaved Changes", "Save", "Discard", "Cancel",
             com.intellij.openapi.ui.Messages.getQuestionIcon(),
         )) {
             com.intellij.openapi.ui.Messages.YES -> doOKAction()
@@ -563,6 +717,11 @@ class MarkupDialog(
     override fun createCenterPanel(): JComponent = JPanel(BorderLayout(JBUI.scale(12), JBUI.scale(8))).apply {
         add(JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
             add(position, BorderLayout.CENTER)
+            if (editable) add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, JBUI.scale(2), 0)).apply {
+                add(markTool); add(penTool); add(arrowTool); add(doubleArrowTool); add(penOptions)
+                add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8))); add(undo); add(clear)
+                add(javax.swing.Box.createHorizontalStrut(JBUI.scale(12)))
+            }, BorderLayout.WEST)
             add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, JBUI.scale(4), 0)).apply {
                 add(zoomOut); add(zoomIn); add(actual); add(fit)
                 add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8)))
@@ -573,6 +732,9 @@ class MarkupDialog(
     }
 
     companion object {
+        fun describeDrawing(i: Int, original: String, drawn: String) =
+            "The user drew on image ${i + 1} ($original). Copy with the drawing on top (read it to see the drawing): $drawn"
+
         fun describe(marks: List<Mark>): String = marks.mapIndexed { i, m ->
             "  ${i + 1}. x=${m.x}, y=${m.y}, w=${m.w}, h=${m.h}" + (m.note.takeIf { it.isNotBlank() }?.let { ": $it" } ?: "")
         }.joinToString("\n")
