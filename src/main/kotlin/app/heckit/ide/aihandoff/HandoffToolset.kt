@@ -40,7 +40,7 @@ class HandoffToolset : McpToolset {
         val project = currentCoroutineContext().project
         val p = HandoffService.getInstance(project).propose(command.trim(), reason.trim(), workingDir(project, workingDirectory), risky, interactive)
         ApplicationManager.getApplication().invokeLater({
-            SessionEditors.revealCards(project)
+            SessionEditors.revealCards(project, p)
         }, project.disposed)
         return "Proposed as ${p.id}. The user decides in the IDE. Call handoff_wait_for_result(id=\"${p.id}\") to get the result."
     }
@@ -81,7 +81,7 @@ class HandoffToolset : McpToolset {
         if (list.isEmpty()) return "No commands given."
         val p = HandoffService.getInstance(project).proposeSequence(list, reason.trim(), workingDir(project, workingDirectory), risky, interactive)
         ApplicationManager.getApplication().invokeLater({
-            SessionEditors.revealCards(project)
+            SessionEditors.revealCards(project, p)
         }, project.disposed)
         return "Proposed as ${p.id} (${list.size} steps). The user decides in the IDE. Call handoff_wait_for_result(id=\"${p.id}\") to get the result."
     }
@@ -161,7 +161,7 @@ class HandoffToolset : McpToolset {
         if (files.isEmpty()) return "No images given."
         val p = HandoffService.getInstance(project).proposeImages(files.map { it.path }, question.trim())
         ApplicationManager.getApplication().invokeLater({
-            SessionEditors.revealCards(project)
+            SessionEditors.revealCards(project, p)
         }, project.disposed)
         return "Shown as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the user's answer."
     }
@@ -187,7 +187,7 @@ class HandoffToolset : McpToolset {
         if (list.isEmpty()) return "No questions with options given."
         val p = HandoffService.getInstance(project).proposeAsk(title.trim(), list)
         ApplicationManager.getApplication().invokeLater({
-            SessionEditors.revealCards(project)
+            SessionEditors.revealCards(project, p)
         }, project.disposed)
         return "Asked as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the user's answers."
     }
@@ -208,7 +208,7 @@ class HandoffToolset : McpToolset {
         val project = currentCoroutineContext().project
         val p = HandoffService.getInstance(project).proposeReview(summary.trim(), TaskChangelists.getInstance(project).prepareReview())
         ApplicationManager.getApplication().invokeLater({
-            SessionEditors.revealCards(project)
+            SessionEditors.revealCards(project, p)
         }, project.disposed)
         return "Review requested as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the user's answer."
     }

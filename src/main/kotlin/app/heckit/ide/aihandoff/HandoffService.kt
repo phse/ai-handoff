@@ -110,6 +110,10 @@ class Proposal(
     @Volatile var fetched = false
     /** Session, die gerade arbeitete, als Claude die Karte schickte - an sie geht das Ergebnis, wenn niemand wartet. */
     @Volatile var session: String? = null
+    /** [session] ist eindeutig (genau eine Session arbeitete) - nur dann blenden Session-Reiter fremde Karten aus. */
+    @Volatile var sessionSure = false
+    /** Session, zu der die Karte gehört, soweit sicher bekannt. */
+    val owner get() = askSession ?: session?.takeIf { sessionSure }
 
     /** Ergebnis für Claude, wie handoff_wait_for_result es liefert. */
     fun resultText(): String {
@@ -269,7 +273,10 @@ class HandoffService(private val project: Project) {
     private fun add(p: Proposal) {
         val sessions = WaitingSessions.getInstance(project)
         // Fragen von Claude Code beantwortet der Hook selbst - nichts nachzustellen.
-        if (p.askSession == null) p.session = sessions.working.singleOrNull()?.id ?: sessions.working.maxByOrNull { it.since }?.id
+        if (p.askSession == null) {
+            p.session = sessions.working.singleOrNull()?.id ?: sessions.working.maxByOrNull { it.since }?.id
+            p.sessionSure = sessions.working.size == 1
+        }
         proposals.add(0, p)
         p.done.invokeOnCompletion {
             javax.swing.Timer(DELIVER_AFTER_MS) {

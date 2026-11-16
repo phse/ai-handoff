@@ -169,7 +169,8 @@ class SessionTabTitleProvider : EditorTabTitleProvider, DumbAware {
             // Ordner außerhalb des Projekts (oder ein Unterordner) gleich im Reiter, damit man die Sessions auseinanderhält.
             val dir = f.cwd?.trimEnd('/')?.takeIf { it != project.basePath?.trimEnd('/') }?.let { " (" + File(it).name + ")" } ?: ""
             // Das Handoff-Symbol zeigt schon, dass es eine Claude-Session ist.
-            (f.title?.let { StringUtil.shortenTextWithEllipsis(it, 40, 0) } ?: "New Session") + dir
+            // Punkt vorne: Die Session wartet auf dich (Karte, Freigabe, Rückfrage) - auch wenn der Reiter nicht vorne ist.
+            (if (SessionEditors.needsYou(project, f)) "● " else "") + (f.title?.let { StringUtil.shortenTextWithEllipsis(it, 40, 0) } ?: "New Session") + dir
         }
 
     override fun getEditorTabTooltipHtml(project: Project, file: VirtualFile): com.intellij.openapi.util.text.HtmlChunk? =
@@ -178,6 +179,13 @@ class SessionTabTitleProvider : EditorTabTitleProvider, DumbAware {
 
 /** Öffnen, Starten und Aufräumen der Session-Reiter. */
 object SessionEditors {
+    /** Wartet etwas in dieser Session auf den Nutzer: eine Karte von ihr oder eine Freigabe/Rückfrage im Terminal (nicht: fertig). */
+    fun needsYou(project: Project, f: SessionFile): Boolean {
+        val id = f.currentSession(project) ?: return false
+        if (HandoffService.getInstance(project).proposals.any { it.isPending && it.owner == id }) return true
+        return project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty().any { it.id == id && !it.finished }
+    }
+
     /** Schon offenen Reiter der Session zeigen, sonst einen neuen öffnen. */
     fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true, cwd: String? = null) {
         val manager = FileEditorManager.getInstance(project)
@@ -251,8 +259,11 @@ object SessionEditors {
      * Neue Karte: Handoff-Fenster öffnen - außer ein Session-Reiter ist vorn, der zeigt die Karte selbst am Ende des
      * Gesprächs; das aufspringende Fenster würde dort nur stören.
      */
-    fun revealCards(project: Project) {
-        if (FileEditorManager.getInstance(project).selectedEditor?.file is SessionFile) return
+    /** Neue Karte sichtbar machen: steht sie im gerade offenen Session-Reiter, reicht das, sonst das Handoff-Fenster zeigen. */
+    fun revealCards(project: Project, card: Proposal? = null) {
+        val tab = FileEditorManager.getInstance(project).selectedEditor?.file as? SessionFile
+        val owner = card?.owner
+        if (tab != null && (owner == null || owner == tab.currentSession(project))) return
         com.intellij.openapi.wm.ToolWindowManager.getInstance(project).getToolWindow("Handoff")?.show()
     }
 
@@ -510,7 +521,7 @@ object SessionLinks {
 
 /** Ein Eintrag im Verlauf. */
 class TranscriptEntry(val kind: Kind, val text: String) {
-    enum class Kind { USER, ASSISTANT, TOOL, NOTE }
+    enum class Kind { USER, ASSISTANT, TOOL, NOTE, SUMMARY }
 }
 
 /**
@@ -556,6 +567,8 @@ class Transcript(val path: String) {
             "user" -> {
                 val content = o.getAsJsonObject("message")?.get("content") ?: return
                 val text = texts(content).joinToString("\n").trim()
+                // Zusammenfassung nach /compact: steht als Nutzer-Nachricht im Protokoll, wird eingeklappt gezeigt.
+                if (o.get("isCompactSummary")?.asBoolean == true) { if (text.isNotEmpty()) entries += TranscriptEntry(TranscriptEntry.Kind.SUMMARY, text); return }
                 userText(text)?.let { entries += it }
             }
             "assistant" -> {
@@ -593,7 +606,8 @@ class Transcript(val path: String) {
             return TranscriptEntry(TranscriptEntry.Kind.USER, (m.groupValues[1].trim() + " " + args).trim())
         }
         Regex("(?s)<local-command-stdout>(.*?)</local-command-stdout>").find(text)?.let { m ->
-            val out = m.groupValues[1].replace(Regex("\u001B\\[[0-9;]*m"), "").trim()
+            // "(ctrl+o to see full summary)" gilt nur im Terminal - hier klappt die Zusammenfassung per Klick auf.
+            val out = m.groupValues[1].replace(Regex("\u001B\\[[0-9;]*m"), "").replace(Regex("\\s*\\(ctrl\\+o[^)]*\\)"), "").trim()
             return if (out.isEmpty()) null else TranscriptEntry(TranscriptEntry.Kind.NOTE, out)
         }
         if (text.startsWith("<")) return null
@@ -673,7 +687,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         return attrs.getAttribute(javax.swing.text.html.HTML.Attribute.HREF) as? String
     }
     /** Wartende Handoff-Karten (Befehle, Fragen, Reviews) am Ende des Verlaufs, damit man hier antworten kann. */
-    private val cards = HandoffPanel(project, compact = true).apply { border = JBUI.Borders.empty(0, JBUI.scale(24) - 8, JBUI.scale(12), JBUI.scale(24) - 8) }
+    private val cards: HandoffPanel = HandoffPanel(project, compact = true, sessionOf = { file.currentSession(project) }, onNewCard = { SwingUtilities.invokeLater { if (scroll.isShowing) scrollToEnd() else endOnShow = true } }).apply { border = JBUI.Borders.empty(0, JBUI.scale(24) - 8, JBUI.scale(12), JBUI.scale(24) - 8) }
 
     /** Drehendes Symbol unter dem letzten Prompt, solange Claude arbeitet - man sieht es, ohne nach oben zu schauen. */
     private val busy = JBLabel("Claude is working…", com.intellij.ui.AnimatedIcon.Default(), javax.swing.SwingConstants.LEFT).apply {
@@ -695,7 +709,36 @@ private class SessionEditor(private val project: Project, private val file: Sess
         pane.alignmentX = 0f; cards.alignmentX = 0f; busy.alignmentX = 0f
         add(pane); add(busy); add(cards)
     }
-    private val scroll = JBScrollPane(conversation).apply { border = JBUI.Borders.empty() }
+    private val scroll: JBScrollPane = JBScrollPane(conversation).apply { border = JBUI.Borders.empty() }
+
+    /**
+     * Wird der Reiter schmaler (z. B. Handoff-Fenster geht auf), bricht der Verlauf um, wird höher und die Ansicht sprang
+     * nach oben (2026-11-16). War sie am Ende, bleibt sie jetzt dort; Bewegungen der Leiste während einer Breitenänderung
+     * zählen nicht als Scrollen des Nutzers.
+     */
+    private var lastWidth = -1
+    private var stickToEnd = true
+    /**
+     * Neue Karte, während der Reiter im Hintergrund war: beim nächsten Zeigen ans Ende. Im Hintergrund legt Swing nichts neu
+     * aus (RepaintManager.addInvalidComponent übergeht unsichtbare Wurzeln) - ein Scrollen zur Karte nahm deren veraltete
+     * Position und sprang nach oben, ebenso Leisten-Änderungen beim Entfernen der Karte (2026-11-16).
+     */
+    private var endOnShow = false
+    init {
+        scroll.addHierarchyListener { e ->
+            if (e.changeFlags and java.awt.event.HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && scroll.isShowing) {
+                if (stickToEnd || endOnShow) scrollToEnd()
+                endOnShow = false
+            }
+        }
+        scroll.verticalScrollBar.model.addChangeListener {
+            if (!scroll.isShowing) return@addChangeListener
+            val bar = scroll.verticalScrollBar
+            val w = scroll.viewport.width
+            if (w != lastWidth) { lastWidth = w; if (stickToEnd) scrollToEnd() }
+            else stickToEnd = bar.value + bar.visibleAmount >= bar.maximum - JBUI.scale(40)
+        }
+    }
 
     // Darf in der Breite schrumpfen, nie in der Höhe: Mindesthöhe 0 ließ BoxLayout die Zeile oben anheften und unten
     // abschneiden (2026-11-16, Unterlängen fehlten).
@@ -912,28 +955,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private fun toggleDictation() {
         val stop = dictating
         input.requestFocusInWindow()
-        fun done(handled: Boolean) = SwingUtilities.invokeLater {
+        fun done(handled: Boolean) {
             logger<SessionEditor>().info("Handoff: startDictation handled=$handled (stop=$stop)")
-            if (!handled) { dictating = false; hint.text = "Dictation did not start - switch it on in System Settings > Keyboard > Dictation."; return@invokeLater }
+            if (!handled) { dictating = false; hint.text = "Dictation did not start - switch it on in System Settings > Keyboard > Dictation."; return }
             dictating = !stop
         }
-        SwingUtilities.invokeLater {
-            runCatching {
-                // Nicht auf den Hauptthread warten (könnte mit dem EDT verklemmen) - Ergebnis kommt per invokeLater zurück.
-                com.intellij.ui.mac.foundation.Foundation.executeOnMainThread(true, false) {
-                    val ok = runCatching {
-                        val app = com.intellij.ui.mac.foundation.Foundation.invoke("NSApplication", "sharedApplication")
-                        // createSelector liefert je nach IDE-Version Pointer oder Selector - per Reflexion, sonst meldet der
-                        // Verifier die Methode unter 2026.1 als fehlend.
-                        val sel = com.intellij.ui.mac.foundation.Foundation::class.java.getMethod("createSelector", String::class.java)
-                            .invoke(null, "startDictation:")
-                        com.intellij.ui.mac.foundation.Foundation.invoke(app, "sendAction:to:from:", sel,
-                            com.intellij.ui.mac.foundation.ID.NIL, com.intellij.ui.mac.foundation.ID.NIL).toInt() != 0
-                    }.onFailure { logger<SessionEditor>().warn("Handoff: dictation failed", it) }.getOrDefault(false)
-                    done(ok)
-                }
-            }.onFailure { logger<SessionEditor>().warn("Handoff: dictation failed", it); done(false) }
-        }
+        Dictation.toggle(::done)
     }
 
     private fun runCommand(cmd: String) {
@@ -1043,7 +1070,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private fun scrollToEnd() = SwingUtilities.invokeLater { scroll.verticalScrollBar.let { it.value = it.maximum } }
 
+    private var needsYou = false
+
     private fun refresh() {
+        SessionEditors.needsYou(project, file).let { if (it != needsYou) { needsYou = it; updateTabTitle() } }
         val id = sessionId
         val info = id?.let { sessions.infos[it] }
         // Neue Session im selben Terminal (nach /clear): Protokoll wechseln.
@@ -1085,6 +1115,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(Md.document(e.text), baseDir()))
             TranscriptEntry.Kind.TOOL -> html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(e.text)).append("</div>")
             TranscriptEntry.Kind.NOTE -> html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(e.text)).append("</pre>")
+            TranscriptEntry.Kind.SUMMARY -> {}
         }
     }
 
@@ -1115,6 +1146,14 @@ private class SessionEditor(private val project: Project, private val file: Sess
                     i = end + 1
                     continue
                 }
+            }
+            if (e.kind == TranscriptEntry.Kind.SUMMARY) {
+                val key = offset + i
+                val open = key in expanded
+                html.append("<div class=\"tool\"><a href=\"$STEPS_LINK$key\">${if (open) "▾" else "▸"} Summary of the earlier conversation</a></div>")
+                if (open) html.append("<div class=\"user\">").append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
+                i++
+                continue
             }
             i++
             appendEntry(html, e)

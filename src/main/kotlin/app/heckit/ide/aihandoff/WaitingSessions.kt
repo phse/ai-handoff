@@ -449,7 +449,7 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
                     if (p.state == Proposal.State.FINISHED) answerAsk(id, input, p) else if (asks[id]?.first === p) File(WaitingHook.waiting, "$id.ask").delete()
                     asks.remove(id)
                 }
-                SessionEditors.revealCards(project)
+                SessionEditors.revealCards(project, p)
             }, project.disposed)
         }
     }

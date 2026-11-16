@@ -235,7 +235,12 @@ in a terminal tab in the background and opens the session in an editor tab:
   typing anything else replaces it.
 - The editor tab shows a spinner while Claude works and the Handoff icon once it is done - visible even while you
   work in another tab.
-- On macOS the microphone button above **Send** starts the system dictation into the prompt field.
+- A **●** in front of the tab title shows that the session waits for you (a card, a permission or a question in the
+  terminal). Cards show only in the tab of the session they belong to; a card for a session in the background opens the
+  Handoff tool window.
+- After `/compact` the summary of the earlier conversation is folded into one line; click it to read it.
+- On macOS the microphone button above **Send** starts the system dictation into the prompt field. The note and
+  answer fields of the cards have one too.
 - The **/** button above **Send** lists all slash commands with a short description; type to filter. **Run** (Enter,
   double-click) sends the command right away, **Insert** (Tab) puts it at the cursor in your prompt.
 - While Claude works, a spinner below the last prompt shows it. A prompt you send meanwhile shows grey as *Queued*:
@@ -343,6 +348,13 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 ## Version history
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
+
+### 1.5.2
+
+Cards show only in their own session tab, a dot marks tabs that wait for you, dictation in the card fields.
+
+The /compact summary is folded, the conversation no longer jumps when a card arrives in the background, and Claude's
+pinned messages take at most 40 % of the Handoff window.
 
 ### 1.5.1
 

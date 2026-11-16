@@ -172,9 +172,9 @@ object Layout {
 
 /**
  * Karten-Liste des Commands-Reiters. [compact]: nur wartende Übergaben (Befehle, Fragen, Reviews, Bilder), ohne Leerzustand,
- * Hinweise und Claude-Nachrichten - für den Session-Reiter, damit man dort antworten kann, ohne ins Handoff-Fenster zu wechseln.
+ * Hinweise und Claude-Nachrichten - für den Session-Reiter ([sessionOf]: dessen Session), damit man dort antworten kann, ohne ins Handoff-Fenster zu wechseln.
  */
-internal class HandoffPanel(private val project: Project, private val compact: Boolean = false) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
+internal class HandoffPanel(private val project: Project, private val compact: Boolean = false, private val sessionOf: (() -> String?)? = null, private val onNewCard: (() -> Unit)? = null) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
     private val service = HandoffService.getInstance(project)
     // Folgt der Breite des Fensters, damit Karten (und die Bildreihen darin) umbrechen statt rechts abgeschnitten zu werden.
     private val list = object : JPanel(), Scrollable {
@@ -188,31 +188,55 @@ internal class HandoffPanel(private val project: Project, private val compact: B
     private var lastNewest = 0L
 
     /** Feste Ablage am unteren Rand für Claudes Nachrichten (siehe [Layout.pinClaudeMessages]). */
-    private val pinned = JPanel().apply {
-        layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        border = JBUI.Borders.compound(JBUI.Borders.customLineTop(JBColor.border()), JBUI.Borders.empty(8, 8, 0, 8))
-    }
+    private val pinned = object : JPanel(), Scrollable {
+        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+        override fun getScrollableUnitIncrement(r: Rectangle, o: Int, d: Int) = JBUI.scale(16)
+        override fun getScrollableBlockIncrement(r: Rectangle, o: Int, d: Int) = r.height
+        override fun getScrollableTracksViewportWidth() = true
+        override fun getScrollableTracksViewportHeight() = false
+    }.apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(8, 8, 0, 8) }
+    /**
+     * Die Ablage scrollt selbst und nimmt höchstens 40 % der Höhe - sonst drückten mehrere "Claude is done"-Karten die
+     * übrigen Karten oben auf einen schmalen Streifen zusammen (2026-11-16).
+     */
+    private val pinnedScroll = object : JBScrollPane(pinned) {
+        override fun getPreferredSize(): Dimension {
+            val want = pinned.preferredSize.height + insets.top + insets.bottom
+            val max = (this@HandoffPanel.height * 0.4).toInt().takeIf { it > 0 } ?: want
+            return Dimension(super.getPreferredSize().width, minOf(want, max))
+        }
+    }.apply { border = JBUI.Borders.customLineTop(JBColor.border()) }
     private val scroll = JBScrollPane(list).apply { border = JBUI.Borders.empty() }
 
     init {
         // Kompakt steht die Liste im Verlauf des Session-Reiters, der selbst scrollt.
         if (compact) { isOpaque = false; list.isOpaque = false; list.border = JBUI.Borders.empty(4, 0); add(list, BorderLayout.CENTER) }
-        else { add(scroll, BorderLayout.CENTER); add(pinned, BorderLayout.SOUTH) }
+        else { add(scroll, BorderLayout.CENTER); add(pinnedScroll, BorderLayout.SOUTH) }
         // Nicht in Screenshot-Läufen: Dort gilt die Sandbox als "gerade aktualisiert".
         if (!compact && System.getProperty("handoff.screenshots") == null) Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
         service.addListener({ rebuild() }, this)
         rebuild()
     }
 
+    private var lastKey: Any? = null
+
     private fun rebuildCompact() {
         list.removeAll()
-        val pending = service.proposals.filter { it.isPending }.sortedBy { it.createdAt }
+        // Im Session-Reiter nur Karten dieser Session (bzw. ohne sicher bekannte Session) - nicht die Frage der Nachbar-Session.
+        val me = sessionOf?.invoke()
+        val pending = service.proposals.filter { it.isPending && (me == null || it.owner == null || it.owner == me) }.sortedBy { it.createdAt }
+        // Unverändert: nichts anfassen. Jedes Neu-Aufbauen löste ein Layout des ganzen Verlaufs aus - im Nachbar-Reiter sprang
+        // die Scroll-Position, als dort eine fremde (ausgeblendete) Karte kam (2026-11-16); auch ein laufendes Diktat brach ab.
+        val key = pending.map { it.id to it.page } to pending.map { it.state }
+        if (key == lastKey && list.componentCount > 0 == pending.isNotEmpty()) return
+        lastKey = key
         pending.forEach { list.add(card(it)); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
         isVisible = pending.isNotEmpty()
         list.revalidate(); list.repaint()
         revalidate(); parent?.revalidate()
         val newest = pending.maxOfOrNull { it.createdAt } ?: 0L
-        if (newest > lastNewest) SwingUtilities.invokeLater { scrollRectToVisible(Rectangle(0, height - 1, 1, 1)) }
+        // Der Session-Reiter scrollt selbst (im Hintergrund stimmen die Positionen hier nicht, siehe SessionEditor).
+        if (newest > lastNewest) onNewCard?.invoke() ?: SwingUtilities.invokeLater { scrollRectToVisible(Rectangle(0, height - 1, 1, 1)) }
         lastNewest = newest
     }
 
@@ -247,8 +271,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             .sortedBy { it.first }.let { if (top) it.reversed() else it }.forEach { (_, make) ->
                 pinned.add(make()); pinned.add(Box.createVerticalStrut(JBUI.scale(8)))
             }
-        pinned.isVisible = pinned.componentCount > 0
-        pinned.revalidate(); pinned.repaint()
+        pinnedScroll.isVisible = pinned.componentCount > 0
+        pinned.revalidate(); pinned.repaint(); revalidate()
 
         // Neue Karte: dorthin scrollen, wo die neuesten stehen.
         val newest = items.maxOfOrNull { it.first } ?: 0L
@@ -453,7 +477,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             }
             card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
                 isOpaque = false
-                add(note, BorderLayout.NORTH)
+                add(Dictation.withMic(note), BorderLayout.NORTH)
                 add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                     isOpaque = false
                     listOf(diff, finish, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
@@ -520,7 +544,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             })
             card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
                 isOpaque = false
-                add(JBScrollPane(input).apply { border = JBUI.Borders.customLine(JBColor.border()) }, BorderLayout.NORTH)
+                add(Dictation.withMic(JBScrollPane(input).apply { border = JBUI.Borders.customLine(JBColor.border()) }, input), BorderLayout.NORTH)
                 add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                     isOpaque = false
                     add(send); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
@@ -644,7 +668,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val dismiss = JButton(if (p.askSession != null) "Answer in Terminal" else "Dismiss").apply { addActionListener { service.dismiss(p, own.text) } }
         card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             isOpaque = false
-            add(own, BorderLayout.NORTH)
+            add(Dictation.withMic(own), BorderLayout.NORTH)
             add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                 isOpaque = false
                 listOf(back, next, dismiss).filter { it.isVisible }.forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
@@ -968,7 +992,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             val dismiss = JButton("Dismiss").apply { addActionListener { service.dismiss(p, note.text) } }
             card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
                 isOpaque = false
-                add(note, BorderLayout.NORTH)
+                add(Dictation.withMic(note), BorderLayout.NORTH)
                 add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                     isOpaque = false; add(choose); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
                 }, BorderLayout.SOUTH)

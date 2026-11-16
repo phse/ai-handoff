@@ -69,6 +69,16 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.5.2</h3>
+            <ul>
+              <li>Cards show only in the session tab they belong to - a question from another session no longer appears in the open tab;
+                  a card for a session in the background opens the Handoff tool window.</li>
+              <li>A dot in front of the tab title marks sessions that wait for you (card, permission, question).</li>
+              <li>The note and answer fields of the cards get the dictation button (macOS).</li>
+              <li>After <code>/compact</code> the summary is folded into one line instead of filling the conversation.</li>
+              <li>The conversation no longer jumps up when a card arrives or is answered while the tab is in the background.</li>
+              <li>Claude's pinned messages take at most 40 % of the Handoff window and scroll on their own.</li>
+            </ul>
             <h3>1.5.1</h3>
             <ul>
               <li>Esc in the session tab's prompt field interrupts Claude, like in the terminal.</li>
