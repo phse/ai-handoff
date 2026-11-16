@@ -447,11 +447,31 @@ object SessionLinks {
             out.append(text)
         }
         // Code-Spannen danach (sie stehen nicht in Links).
-        return CODE.replace(out.toString()) { m ->
+        val withCode = CODE.replace(out.toString()) { m ->
             val raw = StringUtil.unescapeXmlEntities(m.groupValues[1])
             if (raw.contains(' ') || !raw.contains('.') && !raw.contains('/')) return@replace m.value
             if (resolve(raw, base) == null) m.value else a(raw, m.value)
         }
+        return boldTargets(withCode)
+    }
+
+    private val BOLD_TAG = Regex("<b>([^<]{2,80})</b>")
+
+    /**
+     * Fett geschriebene Namen von Einstellungsseiten und IDE-Aktionen ("**Install Plugin from Disk…**") werden zu Links, auch
+     * wenn Claude keinen gesetzt hat - nur bei genau einem Treffer ([IdeTargets]), nicht innerhalb vorhandener Links.
+     */
+    private fun boldTargets(html: String): String {
+        if (!IdeTargets.ready()) return html
+        val out = StringBuilder(); var last = 0
+        for (m in BOLD_TAG.findAll(html)) {
+            val before = html.substring(0, m.range.first)
+            val open = Regex("<a[ >]").findAll(before).count() - Regex("</a>").findAll(before).count()
+            if (open > 0) continue
+            val target = IdeTargets.find(StringUtil.unescapeXmlEntities(m.groupValues[1])) ?: continue
+            out.append(html, last, m.range.first).append(a(target, m.value)); last = m.range.last + 1
+        }
+        return if (last == 0) html else out.append(html, last, html.length).toString()
     }
 
     /** Was ein Link ist: Datei bzw. Ordner, Web-Adresse oder IDE-Ziel. */
@@ -566,6 +586,8 @@ class Transcript(val path: String) {
         // <pasted_content id="abcd">…</pasted_content id="abcd"> ein - ohne Abzug fiele der Prompt unten als "<…" weg.
         val text = unwrapPasted(raw)
         if (text.isEmpty()) return null
+        // Abbruch per Esc: Claude Code schreibt ihn als Nutzer-Nachricht "[Request interrupted by user…]".
+        if (text.startsWith("[Request interrupted by user")) return TranscriptEntry(TranscriptEntry.Kind.NOTE, "Interrupted")
         Regex("<command-name>(.*?)</command-name>").find(text)?.let { m ->
             val args = Regex("(?s)<command-args>(.*?)</command-args>").find(text)?.groupValues?.get(1)?.trim().orEmpty()
             return TranscriptEntry(TranscriptEntry.Kind.USER, (m.groupValues[1].trim() + " " + args).trim())
@@ -739,13 +761,51 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val question = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false }
 
 
-    private val input = JBTextArea(3, 0).apply {
+    /**
+     * Eingabefeld. Den Vorschlag von Claude Code zeichnet es selbst: Der Platzhalter der IDE (emptyText) verschwindet,
+     * sobald das Feld den Fokus hat - genau dann soll man aber sehen, dass Tab ihn übernimmt (2026-11-16).
+     */
+    private val input = object : JBTextArea(3, 0) {
+        override fun paintComponent(g: java.awt.Graphics) {
+            super.paintComponent(g)
+            val s = suggestion ?: return
+            if (document.length > 0) return
+            val g2 = g.create() as java.awt.Graphics2D
+            try {
+                com.intellij.util.ui.GraphicsUtil.setupAntialiasing(g2)
+                g2.font = font
+                val fm = g2.fontMetrics
+                val i = insets
+                g2.color = UIUtil.getContextHelpForeground()
+                // Umbrechen auf die Breite des Felds, dazu der Hinweis auf Tab.
+                val width = this.width - i.left - i.right
+                var y = i.top + fm.ascent
+                val words = "$s   ⇥ Tab".split(' ')
+                var line = StringBuilder()
+                for (w in words) {
+                    val next = if (line.isEmpty()) w else "$line $w"
+                    if (fm.stringWidth(next) > width && line.isNotEmpty()) { g2.drawString(line.toString(), i.left, y); y += fm.height; line = StringBuilder(w) }
+                    else line = StringBuilder(next)
+                }
+                if (line.isNotEmpty()) g2.drawString(line.toString(), i.left, y)
+            } finally { g2.dispose() }
+        }
+    }.apply {
         lineWrap = true; wrapStyleWord = true; font = UIUtil.getLabelFont()
         border = JBUI.Borders.empty(6, 8)
         inputMap.put(KeyStroke.getKeyStroke("ENTER"), "handoff.send")
         inputMap.put(KeyStroke.getKeyStroke("shift ENTER"), "insert-break")
         // Tab bei leerem Feld übernimmt den Vorschlag von Claude Code (wie im Terminal); die Slash-Liste hängt sich davor.
         inputMap.put(KeyStroke.getKeyStroke("TAB"), "handoff.suggestion")
+        // Esc wie im Terminal: Claude unterbrechen, solange es arbeitet (die Slash-Liste schließt Esc vorher, falls offen).
+        inputMap.put(KeyStroke.getKeyStroke("ESCAPE"), "handoff.interrupt")
+        actionMap.put("handoff.interrupt", object : AbstractAction() {
+            override fun actionPerformed(e: java.awt.event.ActionEvent) {
+                if (dictating) { dictating = false; return }
+                val tab = file.tab ?: return
+                if (terminalOpen && file.busy) SessionTerminals.keys(project, tab, "\u001b")
+            }
+        })
         actionMap.put("handoff.suggestion", object : AbstractAction() {
             override fun actionPerformed(e: java.awt.event.ActionEvent) {
                 val s = suggestion
@@ -756,11 +816,17 @@ private class SessionEditor(private val project: Project, private val file: Sess
             override fun actionPerformed(e: java.awt.event.ActionEvent) { if (!slash.acceptIfVisible()) send() }
         })
         transferHandler = ImageDropHandler(transferHandler)
+        addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mousePressed(e: java.awt.event.MouseEvent) { if (watchKeys) SwingUtilities.invokeLater { logInputState("clicked") } }
+        })
         addFocusListener(object : java.awt.event.FocusAdapter() {
             override fun focusLost(e: java.awt.event.FocusEvent) { if (dictating && e.oppositeComponent !== dictate) dictating = false }
         })
         addKeyListener(object : java.awt.event.KeyAdapter() {
-            override fun keyPressed(e: java.awt.event.KeyEvent) { if (e.keyCode == java.awt.event.KeyEvent.VK_ESCAPE && dictating) dictating = false }
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                if (watchKeys) { watchKeys = false; logger<SessionEditor>().info("Handoff: input first key after send: ${e.keyCode}") }
+                if (e.keyCode == java.awt.event.KeyEvent.VK_ESCAPE && dictating) dictating = false
+            }
         })
         document.addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
             override fun textChanged(e: javax.swing.event.DocumentEvent) { SwingUtilities.invokeLater { updateMarkLink() } }
@@ -939,12 +1005,22 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Nicht erneut startDictation: schicken - war das Diktat schon von Hand beendet, startete es neu.
         dictating = false
         runCatching { input.inputContext?.endComposition() }
-        runCatching { input.enableInputMethods(false); input.enableInputMethods(true) }
+        // Kein enableInputMethods(false/true) mehr: Vermutlich nahm das Feld danach unter macOS gar keine Tasten mehr an
+        // (2026-11-16, nach einem gedroppten Bild und Send eingefroren).
     }
+
+    /** Fürs Log: Zustand des Felds nach dem Senden und ob danach Tasten ankommen (eingefrorenes Feld, 2026-11-16). */
+    private var watchKeys = false
+
+    private fun logInputState(what: String): Unit = logger<SessionEditor>().info(
+        "Handoff: input $what enabled=${input.isEnabled} editable=${input.isEditable} focusOwner=${input.isFocusOwner} " +
+            "windowActive=${SwingUtilities.getWindowAncestor(input)?.isActive} ime=${input.inputContext?.locale}")
 
     private fun send() {
         val text = input.text.trim().takeIf { it.isNotEmpty() } ?: return
         endDictation()
+        watchKeys = true
+        SwingUtilities.invokeLater { logInputState("after send") }
         // Session läuft nicht mehr (z. B. nach einem IDE-Neustart): fortsetzen und den Prompt gleich mitgeben.
         val id = sessionId
         if (resumable && id != null && !(file.tab != null && terminalOpen) && !(sessions.canReply(id))) {
@@ -1162,7 +1238,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private var baseEmptyText = ""
 
     private fun applyEmptyText() {
-        val text = suggestion?.let { "$it   (Tab)" } ?: baseEmptyText
+        // Mit Vorschlag zeichnet das Feld selbst (auch mit Fokus); der Platzhalter der IDE bleibt dann leer.
+        val text = if (suggestion != null) "" else baseEmptyText
         if (input.emptyText.text != text) { input.emptyText.text = text; input.repaint() }
     }
 
@@ -1210,4 +1287,53 @@ fun unwrapPasted(text: String): String = if (text.contains("pasted_content id=\"
 private class SmallButton(text: String?, icon: Icon? = null) : JButton(text, icon) {
     override fun getPreferredSize(): java.awt.Dimension = super.getPreferredSize().apply { width = JBUI.scale(34) }
     override fun getMinimumSize(): java.awt.Dimension = preferredSize
+}
+
+/**
+ * Namen von Einstellungsseiten und IDE-Aktionen → Link (`settings:<Name>` bzw. `action:<Id>`). Der Index entsteht einmal im
+ * Hintergrund; bis dahin verlinkt [SessionLinks] nichts zusätzlich. Mehrdeutige Namen fallen heraus.
+ */
+object IdeTargets {
+    @Volatile private var settings: Map<String, String>? = null
+    @Volatile private var actions: Map<String, String>? = null
+    private val started = java.util.concurrent.atomic.AtomicBoolean()
+
+    private fun norm(s: String) = s.replace('\u00a0', ' ').trim().removeSuffix("…").removeSuffix("...").trim().lowercase().replace(Regex("\\s+"), " ")
+
+    fun ready(): Boolean {
+        if (started.compareAndSet(false, true)) com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread { build() }
+        return actions != null
+    }
+
+    private fun build() {
+        val s = HashMap<String, String?>()
+        runCatching {
+            com.intellij.openapi.options.Configurable.APPLICATION_CONFIGURABLE.extensionList.forEach { ep ->
+                runCatching { ep.displayName }.getOrNull()?.takeIf { it.isNotBlank() }?.let { n -> s.merge(norm(n), n) { a, b -> if (a == b) a else null } }
+            }
+        }
+        settings = s.filterValues { it != null }.mapValues { it.value!! }
+        val a = HashMap<String, String?>()
+        runCatching {
+            val manager = com.intellij.openapi.actionSystem.ActionManager.getInstance()
+            for (id in manager.getActionIdList("")) {
+                val text = runCatching { manager.getActionOrStub(id)?.templatePresentation?.text }.getOrNull()?.takeIf { it.length >= 4 } ?: continue
+                a.merge(norm(text), id) { x, y -> if (x == y) x else null }
+            }
+        }
+        actions = a.filterValues { it != null }.mapValues { it.value!! }
+    }
+
+    /** Link für einen fett geschriebenen Namen; "Settings | Tools | MCP Server" zählt als Seite "MCP Server". */
+    fun find(name: String): String? {
+        val n = norm(name.substringAfterLast('|'))
+        if (n.length < 3) return null
+        settings?.get(n)?.let { return "settings:" + java.net.URLEncoder.encode(it, Charsets.UTF_8).replace("+", "%20") }
+        if (name.contains('|') || name.trimEnd().endsWith(":")) return null
+        // Aktionen führen etwas aus: einzelne Wörter wie **Run** oder **Send** sind meist keine Aktion gemeint - nur mehrere
+        // Wörter oder Namen mit "…" (Dialog-Aktionen) verlinken.
+        val t = name.trim()
+        if (!t.contains(' ') && !t.endsWith("…") && !t.endsWith("...")) return null
+        return actions?.get(n)?.let { "action:$it" }
+    }
 }

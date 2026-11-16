@@ -69,6 +69,15 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.5.1</h3>
+            <ul>
+              <li>Esc in the session tab's prompt field interrupts Claude, like in the terminal.</li>
+              <li>Names of settings pages and IDE actions written in bold become links in the session tab (exact matches only);
+                  sessions started from Handoff are told to look up action ids with <code>search_ide_actions</code> and link them.</li>
+              <li>The suggested prompt stays visible while the prompt field has the focus, with a hint that Tab takes it.</li>
+              <li>The prompt field no longer stops taking keys after sending a dropped image or dictated text.</li>
+              <li>After an interrupt the tab and the cards no longer keep showing "Claude is working…"; the interrupt shows as a grey note.</li>
+            </ul>
             <h3>1.5.0</h3>
             <ul>
               <li><b>Claude Code's own questions in the session tab</b>: when Claude asks with options (AskUserQuestion), the question

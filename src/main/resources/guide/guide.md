@@ -245,7 +245,9 @@ in a terminal tab in the background and opens the session in an editor tab:
 - Links in Claude's messages open in the IDE: file paths (absolute or relative, with `:line`), also file names in
   code spans like `src/Foo.kt:12`, plain web addresses and existing absolute paths in the text; `settings:<Name>` opens a
   settings page, `action:<ActionId>` runs an IDE action. Right-click a link for **Reveal in Finder**, **Open in
-  Terminal**, **Copy Path** or **Copy Link**. Sessions started from Handoff are told at start to link as much as possible and to show images with
+  Terminal**, **Copy Path** or **Copy Link**. Names of settings pages and IDE actions in bold (e.g. **Install Plugin from Disk…**) become links when
+  exactly one matches - single words only for settings pages, so a bold **Run** never runs anything. Sessions started from
+  Handoff are told at start to link as much as possible (action ids via `search_ide_actions`) and to show images with
   `handoff_show_images` instead of opening them in another app.
 - Drop image files onto the prompt field, or paste a screenshot (⌘V): the prompt gets the file path, and Claude reads
   the image. Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
@@ -341,6 +343,10 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 ## Version history
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
+
+### 1.5.1
+
+Esc in the session tab interrupts Claude; the tab notices the interrupt.
 
 ### 1.5.0
 

@@ -35,6 +35,9 @@ object WaitingHook {
         "Link as much as possible: files and folders as [name](/absolute/path:line), web pages as plain URLs, settings pages as " +
         "[Plugins](settings:Plugins), IDE actions as [Restart IDE](action:RestartIde) (only action ids you have verified). " +
         "Right-clicking a link offers Reveal in Finder and Open in Terminal. " +
+        // 2026-11-16: Aktionen wurden selten verlinkt, weil Claude die IDs mühsam in den JARs suchen musste.
+        "Before naming an IDE action, look up its id with the MCP tool search_ide_actions (load it via ToolSearch if deferred) " +
+        "and link it; write names of actions and settings pages in bold - the tab links exact matches by itself. " +
         // 2026-11-15: Ein gerendertes 3D-Bild ging per `open` an Vorschau statt an Handoff.
         "Show images the user should look at, approve or choose from (renders, screenshots, variants) with the MCP tool " +
         "handoff_show_images (load it via ToolSearch if deferred), not with open or another app."
@@ -316,6 +319,18 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         com.intellij.ide.util.PropertiesComponent.getInstance(project).setList(DIRS_KEY, (extraDirs() + d).takeLast(20))
     }
 
+    /** Letzte Nutzer-Nachricht im Protokoll ist ein Abbruch, jünger als [since]. Liest nur das Ende der Datei. */
+    private fun interrupted(transcript: String?, since: Long): Boolean = runCatching {
+        val file = File(transcript ?: return false)
+        if (file.lastModified() < since) return false
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            val len = raf.length(); val from = maxOf(0L, len - 32_000)
+            val buf = ByteArray((len - from).toInt()); raf.seek(from); raf.readFully(buf)
+            val last = String(buf, Charsets.UTF_8).lines().lastOrNull { it.contains("\"type\":\"user\"") || it.contains("\"type\":\"assistant\"") }
+            last != null && last.contains("\"type\":\"user\"") && last.contains("[Request interrupted by user")
+        }
+    }.getOrDefault(false)
+
     private fun read(f: File) = runCatching { JsonParser.parseString(f.readText()).asJsonObject }.getOrNull()
     private fun JsonObject.str(k: String) = get(k)?.takeIf { it.isJsonPrimitive }?.asString
 
@@ -353,7 +368,9 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/')
             if (!inProject(cwd)) return@mapNotNull null
-            // Abgebrochen (Esc im Terminal): kein Stop-Hook. Nach 30 Minuten ohne Bewegung im Protokoll nicht mehr zeigen.
+            // Abgebrochen (Esc): kein Stop-Hook, aber Claude Code schreibt "[Request interrupted by user…]" ins Protokoll.
+            if (interrupted(o.str("transcript_path"), f.lastModified())) { f.delete(); sent.remove(id); return@mapNotNull null }
+            // Sonst nach 30 Minuten ohne Bewegung im Protokoll nicht mehr zeigen.
             val last = maxOf(f.lastModified(), o.str("transcript_path")?.let { File(it).lastModified() } ?: 0L)
             if (now - last > 30 * 60_000L) return@mapNotNull null
             WorkingSession(id, f.lastModified(), cwd!!, o.str("prompt").orEmpty())
