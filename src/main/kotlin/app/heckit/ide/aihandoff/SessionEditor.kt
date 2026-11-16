@@ -550,6 +550,8 @@ class Transcript(val path: String) {
     var title: String? = null
     /** Per /rename gesetzt: gilt vor dem automatischen Titel, auch vor später geschriebenen ai-title-Zeilen. */
     private var customTitle = false
+    /** Letzter Werkzeugaufruf ungekürzt (Name und Befehl bzw. Datei) - zeigt bei einer Freigabe, worum es geht. */
+    var lastTool: String? = null
         private set
     private var offset = 0L
     /**
@@ -617,6 +619,7 @@ class Transcript(val path: String) {
                             c.str("id")?.let { toolLines[it] = line }
                             if (c.str("name") == "TaskStop") c.getAsJsonObject("input")?.let { i -> (i.str("task_id") ?: i.str("shell_id"))?.let { background.remove(it) } }
                             entries += TranscriptEntry(TranscriptEntry.Kind.TOOL, line)
+                            lastTool = fullTool(c.str("name").orEmpty(), c.getAsJsonObject("input"))
                         }
                     }
                 }
@@ -662,6 +665,16 @@ class Transcript(val path: String) {
         }
         if (text.startsWith("<")) return null
         return TranscriptEntry(TranscriptEntry.Kind.USER, text.removePrefix("The user sent this follow-up prompt from the IDE (Handoff tool window):").trim())
+    }
+
+    /** Werkzeugaufruf für die Freigabe: Name und der ganze Befehl (bzw. Datei, Adresse …), nicht gekürzt. */
+    private fun fullTool(name: String, input: JsonObject?): String {
+        val short = name.removePrefix("mcp__").replace("__", " · ")
+        val detail = input?.let { i ->
+            listOf("command", "file_path", "pattern", "url", "query", "description", "prompt")
+                .firstNotNullOfOrNull { k -> i.get(k)?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() } }
+        }
+        return if (detail != null) "$short: $detail" else short
     }
 
     private fun toolLine(name: String, input: JsonObject?): String {
@@ -1230,7 +1243,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val sessionId get() = file.currentSession(project)
     private val terminalOpen get() = file.tab?.let { SessionTerminals.isOpen(project, it) } == true
     /** Vorschläge für Slash-Befehle - nur, wenn sie die Session erreichen (Terminal). */
-    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }) { terminalOpen }
+    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }, enabled = { terminalOpen })
 
     /**
      * Diktat und Eingabemethode zurücksetzen, bevor das Feld geleert wird: Nach einem diktierten und abgeschickten Prompt
@@ -1505,6 +1518,16 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 // (Taste 1 hakte nur die erste Option an) - dann nur der Weg ins Terminal (2026-11-15).
                 val asking = transcript?.entries?.lastOrNull()?.let { it.kind == TranscriptEntry.Kind.TOOL && it.text.startsWith("AskUserQuestion") } == true
                 if (tab != null && terminal && waiting.notificationType == "permission_prompt" && !asking) {
+                    // Worum es geht: der Werkzeugaufruf, auf den Claude Code wartet - sonst stand nur "needs your permission" da.
+                    transcript?.lastTool?.let { t: String ->
+                        question.add(JBScrollPane(javax.swing.JTextArea(t).apply {
+                            isEditable = false; lineWrap = true; wrapStyleWord = false
+                            font = com.intellij.openapi.editor.colors.EditorColorsManager.getInstance().globalScheme.getFont(com.intellij.openapi.editor.colors.EditorFontType.PLAIN)
+                            background = UIUtil.getPanelBackground(); border = JBUI.Borders.empty(4, 6)
+                            rows = minOf(6, t.length / 90 + t.count { it == '\n' } + 1)
+                        }).apply { alignmentX = 0f; border = JBUI.Borders.customLine(JBColor.border()); maximumSize = java.awt.Dimension(Int.MAX_VALUE, JBUI.scale(130)) }, question.componentCount - 1)
+                        question.add(Box.createVerticalStrut(JBUI.scale(6)), question.componentCount - 1)
+                    }
                     fun key(label: String, keys: String, tip: String) = JButton(label).apply {
                         toolTipText = tip
                         addActionListener { SessionTerminals.keys(project, tab, keys) }

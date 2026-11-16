@@ -252,7 +252,7 @@ in a terminal tab in the background and opens the session in an editor tab:
   Handoff are told at start to link as much as possible (action ids via `search_ide_actions`) and to show images with
   `handoff_show_images` instead of opening them in another app.
 - Type `@` in the prompt field (also mid-prompt): a list shows the files open in the editor, the current one first; typing
-  filters. From two typed letters on, matching files from the whole project follow below the open ones. The chosen file shows short as *[@name.md #1]* and goes to Claude as an `@path` mention, so Claude reads it.
+  filters. From two typed letters on, matching files from the whole project follow below the open ones. This works in projects only, not in the IDE's home/welcome project. The chosen file shows short as *[@name.md #1]* and goes to Claude as an `@path` mention, so Claude reads it.
   Use it to give a file as context on purpose.
 - Drop image files onto the prompt field, or paste a screenshot (⌘V): the field shows them short as *[Image #1]* (other
   files as *[File #2: name]*), Claude gets the file path and reads the image. A short name acts like one character:

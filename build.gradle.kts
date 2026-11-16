@@ -69,6 +69,11 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.6.1</h3>
+            <ul>
+              <li>Permission prompts in the session tab show the full command (or file) Claude wants to run above Yes/No.</li>
+              <li>The guide notes that the <code>@</code> list works in projects only, not in the IDE's home project.</li>
+            </ul>
             <h3>1.6.0</h3>
             <ul>
               <li><b>Draw on images</b>: a pen, an arrow and a double arrow in the image viewer, with six colors and three line widths
