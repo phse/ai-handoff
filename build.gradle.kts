@@ -69,6 +69,10 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.7.1</h3>
+            <ul>
+              <li>The plugin icon shows again in the Marketplace and the Plugins dialog.</li>
+            </ul>
             <h3>1.7.0</h3>
             <ul>
               <li>A prompt from the session tab is held back if the terminal input already holds text (e.g. an <code>@file</code>
