@@ -1,0 +1,4 @@
+<!-- Gleiche Knöpfe wie handoff-welcome.xml - der Verifier verlangt je optionaler Abhängigkeit eine eigene config-file. -->
+<idea-plugin xmlns:xi="http://www.w3.org/2001/XInclude">
+    <xi:include href="/META-INF/handoff-welcome.xml" xpointer="xpointer(/idea-plugin/*)"/>
+</idea-plugin>

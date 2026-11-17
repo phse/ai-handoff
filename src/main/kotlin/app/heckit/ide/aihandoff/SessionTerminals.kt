@@ -1,3 +1,8 @@
+// Die Terminal-API ist experimentell/intern markiert. Diese Datei ist bewusst die einzige Stelle, die sie anfasst (Wrapper
+// SessionTerminals → TerminalBridge, Fehler werden in guard() abgefangen) - die Warnungen dazu hier gesammelt unterdrücken,
+// statt sie an jedem Aufruf zu sehen. Der Plugin Verifier listet die Nutzung weiterhin.
+@file:Suppress("UnstableApiUsage")
+
 package app.heckit.ide.aihandoff
 
 import com.intellij.openapi.components.Service
@@ -74,10 +79,18 @@ object SessionTerminals {
 
     /**
      * Vorschlag für den nächsten Prompt, den Claude Code nach einer Antwort grau ins Eingabefeld schreibt (Tab übernimmt ihn
-     * dort). Steht nirgends gespeichert - nur auf dem Bildschirm, in der Zeile hinter "❯". Handoff tippt nie ins Feld des
-     * Terminals, also ist Text dort der Vorschlag (oder etwas, das jemand direkt im Terminal tippt).
+     * dort). Steht nirgends gespeichert - nur auf dem Bildschirm, in der Zeile hinter "❯". Getippter Text steht dort ebenso,
+     * aber in der normalen Schriftfarbe - der zählt nicht als Vorschlag (siehe [typedInput]).
      */
-    fun promptSuggestion(project: Project, tab: String): String? = guard("suggestion") { bridge(project).promptSuggestion(tab) }
+    fun promptSuggestion(project: Project, tab: String): String? =
+        guard("suggestion") { bridge(project).promptLine(tab)?.takeUnless { it.second }?.first }
+
+    /**
+     * Text, der schon im Eingabefeld des Terminals steht (direkt getippt oder per „Send to Claude Code“ als `@datei`
+     * eingefügt). Ein Prompt aus dem Handoff-Reiter hinge sich hinten an und ginge mit ab (2026-11-17).
+     */
+    fun typedInput(project: Project, tab: String): String? =
+        guard("typedInput") { bridge(project).promptLine(tab)?.takeIf { it.second }?.first }
 
     private fun <T> guard(what: String, block: () -> T): T? {
         if (!available) return null
@@ -86,10 +99,14 @@ object SessionTerminals {
     }
 }
 
-/** Alles, was die Terminal-API direkt anfasst. Wird erst geladen, wenn [SessionTerminals.available] stimmt. */
+/**
+ * Alles, was Handoff mit Terminal-Reitern macht, ohne die Terminal-API selbst anzufassen - das tut nur [TerminalApi].
+ * Wird erst geladen, wenn [SessionTerminals.available] stimmt.
+ */
 @Service(Service.Level.PROJECT)
 class TerminalBridge(private val project: Project) {
-    private val tabs = ConcurrentHashMap<String, TerminalToolWindowTab>()
+    /** Kennung → Reiter (ein `TerminalToolWindowTab`, hier bewusst als Any - siehe [TerminalApi]). */
+    private val tabs = ConcurrentHashMap<String, Any>()
 
     fun hasTabs() = tabs.isNotEmpty()
 
@@ -105,97 +122,133 @@ class TerminalBridge(private val project: Project) {
      * Nur Reiter mit unserem Namen, die wir in dieser Sitzung nicht selbst geöffnet haben.
      */
     fun closeOrphans() {
-        val manager = TerminalToolWindowTabsManager.getInstance(project)
         val ours = tabs.values.toSet()
-        manager.tabs.filter { t -> t !in ours && t.content.displayName.let { it == TAB_NAME || it.startsWith("$TAB_NAME ") } }
-            .forEach { manager.closeTab(it) }
+        TerminalApi.tabs(project).filter { t -> t !in ours && TerminalApi.content(t).displayName.let { it == TAB_NAME || it.startsWith("$TAB_NAME ") } }
+            .forEach { TerminalApi.close(project, it) }
     }
 
     fun start(command: String, dir: String?): String {
         closeOrphans()
         val id = UUID.randomUUID().toString()
-        val tab = TerminalToolWindowTabsManager.getInstance(project).createTabBuilder()
-            .workingDirectory(dir)
-            .envVariables(mapOf("HANDOFF_TAB" to id))
-            .tabName(TAB_NAME)
-            .requestFocus(false)
-            // Sonst startet die Shell erst, wenn jemand das Terminal-Fenster öffnet - es soll im Hintergrund bleiben.
-            .deferSessionStartUntilUiShown(false)
-            .createTab()
+        // Sonst startet die Shell erst, wenn jemand das Terminal-Fenster öffnet - es soll im Hintergrund bleiben.
+        val tab = TerminalApi.create(project, dir, mapOf("HANDOFF_TAB" to id), TAB_NAME, background = true)
         tabs[id] = tab
-        tab.view.createSendTextBuilder().shouldExecute().send(command)
+        TerminalApi.send(tab, command, execute = true)
         return id
     }
 
     fun adopt(ref: String): String? {
-        val manager = TerminalToolWindowTabsManager.getInstance(project)
-        val tab = manager.tabs.firstOrNull { t ->
-            val models = t.view.outputModels
-            listOf(models.regular, models.alternative).any { m ->
-                // Nur das Ende der Ausgabe - die Kennung ist gerade erst erschienen.
-                val start = maxOf(m.startOffset, m.endOffset.minus(20_000L))
-                m.getText(start, m.endOffset).contains(ref)
-            }
-        } ?: return null
+        // Nur das Ende der Ausgabe - die Kennung ist gerade erst erschienen.
+        val tab = TerminalApi.tabs(project).firstOrNull { t -> TerminalApi.outputTails(t, 20_000L).any { it.text.contains(ref) } } ?: return null
         tabs.entries.firstOrNull { it.value == tab }?.let { return it.key }
         val id = UUID.randomUUID().toString()
         tabs[id] = tab
         return id
     }
 
-    /** Muss auf dem EDT laufen ([TerminalToolWindowTabsManager.tabs]). Geschlossene Reiter fallen dabei aus der Liste. */
+    /** Muss auf dem EDT laufen (Liste der Reiter). Geschlossene Reiter fallen dabei aus der Liste. */
     fun isOpen(id: String): Boolean {
         val tab = tabs[id] ?: return false
-        if (tab in TerminalToolWindowTabsManager.getInstance(project).tabs) return true
+        if (tab in TerminalApi.tabs(project)) return true
         tabs.remove(id)
         return false
     }
 
     fun send(id: String, text: String, execute: Boolean, enter: String = "\r"): Boolean {
         if (!isOpen(id)) return false
-        val view = tabs[id]!!.view
+        val tab = tabs[id]!!
         // Mehrzeilig nicht als Einfügen (bracketed paste): Claude Code schließt Eingefügtes in <pasted_content id="…"> ein, und
         // Remote Control zeigt die Marker an. Esc+Enter ist der Zeilenumbruch von Claude Code (wie Shift+Enter) - so kommt der
         // Text als ein getippter Prompt an (2026-11-15 per PTY mit Claude Code 2.1.325 geprüft, auch ohne Pausen).
-        view.createSendTextBuilder().send(text.replace("\r\n", "\n").replace("\n", "\u001b\r"))
+        TerminalApi.send(tab, text.replace("\r\n", "\n").replace("\n", "\u001b\r"), execute = false)
         // Enter getrennt und etwas später: Kommt "Text\r" in einem Stück, hält Claude Code es für eingefügten Text und macht
         // aus dem \r einen Zeilenumbruch (Sandbox 2026-11-14, nicht jedes Mal) - der Prompt bliebe ungesendet im Feld stehen.
-        if (execute) javax.swing.Timer(ENTER_DELAY_MS) { if (isOpen(id)) view.sendText(enter) }.apply { isRepeats = false; start() }
+        if (execute) javax.swing.Timer(ENTER_DELAY_MS) { if (isOpen(id)) TerminalApi.send(tab, enter, execute = false) }.apply { isRepeats = false; start() }
         return true
     }
 
-    fun promptSuggestion(id: String): String? {
+    /**
+     * Text hinter "❯" und ob er getippt ist: Bei Vorschlag und Platzhalter (grau) steht der Cursor direkt hinter "❯ ", bei
+     * Getipptem dahinter (per PTY mit Claude Code 2.1.325 geprüft, 2026-11-17). Die Schriftfarbe wäre eindeutiger, ist aber
+     * nur über interne API zu lesen.
+     */
+    fun promptLine(id: String): Pair<String, Boolean>? {
         if (!isOpen(id)) return null
-        val models = tabs[id]!!.view.outputModels
-        for (m in listOf(models.alternative, models.regular)) {
-            val start = maxOf(m.startOffset, m.endOffset.minus(6_000L))
-            val line = m.getText(start, m.endOffset).lines().lastOrNull { it.trimStart().startsWith("❯") } ?: continue
-            return line.trimStart().removePrefix("❯").replace('\u00a0', ' ').trim().trim('│').trim().takeIf { it.isNotEmpty() }
+        // Alternativer Bildschirm zuerst - dort läuft Claude Code.
+        for (tail in TerminalApi.outputTails(tabs[id]!!, 6_000L).reversed()) {
+            val all = tail.text
+            val lineStart = all.lines().let { ls ->
+                val i = ls.indexOfLast { it.trimStart().startsWith("❯") }
+                if (i < 0) -1 else ls.take(i).sumOf { it.length + 1 }
+            }
+            if (lineStart < 0) continue
+            val line = all.substring(lineStart).substringBefore('\n')
+            val text = line.trimStart().removePrefix("❯").replace(' ', ' ').trim().trim('│').trim().takeIf { it.isNotEmpty() } ?: return null
+            val inputAt = lineStart + line.indexOf('❯') + 2
+            return text to (tail.cursor != null && tail.cursor > inputAt)
         }
         return null
     }
 
     fun shell(dir: String) {
-        TerminalToolWindowTabsManager.getInstance(project).createTabBuilder().workingDirectory(dir).createTab()
+        TerminalApi.create(project, dir, emptyMap(), null, background = false)
         ToolWindowManager.getInstance(project).getToolWindow("Terminal")?.activate(null)
     }
 
     fun close(id: String) {
         val tab = tabs[id]?.takeIf { isOpen(id) } ?: return
         tabs.remove(id)
-        TerminalToolWindowTabsManager.getInstance(project).closeTab(tab)
+        TerminalApi.close(project, tab)
     }
 
     fun rename(id: String, name: String) {
-        val tab = tabs[id]?.takeIf { isOpen(id) } ?: return
-        if (tab.content.displayName != name) tab.content.displayName = name
+        val content = tabs[id]?.takeIf { isOpen(id) }?.let { TerminalApi.content(it) } ?: return
+        if (content.displayName != name) content.displayName = name
     }
 
     fun show(id: String) {
-        val tab = tabs[id]?.takeIf { isOpen(id) } ?: return
+        val content = tabs[id]?.takeIf { isOpen(id) }?.let { TerminalApi.content(it) } ?: return
         val window = ToolWindowManager.getInstance(project).getToolWindow("Terminal") ?: return
-        window.activate {
-            window.contentManager.setSelectedContent(tab.content, true)
+        window.activate { window.contentManager.setSelectedContent(content, true) }
+    }
+}
+
+/** Ende einer Terminal-Ausgabe: Text und Position des Cursors darin (null, wenn er davor steht). */
+class TerminalTail(val text: String, val cursor: Int?)
+
+/**
+ * Die einzige Stelle, die die experimentelle Terminal-API anfasst. Der Marketplace (Plugin Verifier) zählt jede Kombination
+ * aus API-Element und aufrufender Methode einzeln - verteilt über [TerminalBridge] waren es 91 Meldungen (1.6.2). Hier nutzt
+ * jede Methode nur ihre eigenen Elemente, Reiter laufen nach außen als Any.
+ */
+private object TerminalApi {
+    private fun manager(project: Project) = TerminalToolWindowTabsManager.getInstance(project)
+
+    fun tabs(project: Project): List<Any> = manager(project).tabs
+
+    fun close(project: Project, tab: Any) = manager(project).closeTab(tab as TerminalToolWindowTab)
+
+    fun create(project: Project, dir: String?, env: Map<String, String>, name: String?, background: Boolean): Any {
+        var b = manager(project).createTabBuilder().workingDirectory(dir)
+        if (env.isNotEmpty()) b = b.envVariables(env)
+        if (name != null) b = b.tabName(name)
+        if (background) b = b.requestFocus(false).deferSessionStartUntilUiShown(false)
+        return b.createTab()
+    }
+
+    fun content(tab: Any): com.intellij.ui.content.Content = (tab as TerminalToolWindowTab).content
+
+    fun send(tab: Any, text: String, execute: Boolean) {
+        val builder = (tab as TerminalToolWindowTab).view.createSendTextBuilder()
+        (if (execute) builder.shouldExecute() else builder).send(text)
+    }
+
+    /** Die letzten [chars] Zeichen der normalen und der alternativen Ausgabe (in dieser Reihenfolge). */
+    fun outputTails(tab: Any, chars: Long): List<TerminalTail> {
+        val models = (tab as TerminalToolWindowTab).view.outputModels
+        return listOf(models.regular, models.alternative).map { m ->
+            val start = maxOf(m.startOffset, m.endOffset.minus(chars))
+            TerminalTail(m.getText(start, m.endOffset).toString(), (m.cursorOffset - start).takeIf { it >= 0 }?.toInt())
         }
     }
 }

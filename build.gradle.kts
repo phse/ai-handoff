@@ -69,6 +69,14 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.7.0</h3>
+            <ul>
+              <li>A prompt from the session tab is held back if the terminal input already holds text (e.g. an <code>@file</code>
+                  from <i>Send to Claude Code</i>) - a hint shows it; send again to send both.</li>
+              <li>Session tabs and their terminals survive a branch switch that restores the editor tabs.</li>
+              <li>The <i>New/Resume Claude Session…</i> buttons show in the 2026.3 Home window of IntelliJ IDEA and PyCharm too.</li>
+              <li>Fewer experimental terminal API calls (one wrapper).</li>
+            </ul>
             <h3>1.6.2</h3>
             <ul>
               <li><code>/resume</code> in the session tab lists the sessions of the working folder too (e.g. from the IDE's home

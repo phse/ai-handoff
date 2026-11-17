@@ -78,6 +78,7 @@ object CommandRunner {
 
         // Terminal-Konsole statt normaler Konsole: zeigt Farben und Fortschrittsbalken richtig und blendet verdeckte
         // Eingaben (Passwörter) nicht ein - die normale Run-Konsole spiegelt jede Eingabe selbst.
+        @Suppress("UnstableApiUsage") // einzige Stelle; alles andere am Terminal läuft über SessionTerminals.kt
         val console = TerminalExecutionConsoleBuilder(project).build().apply { attachToProcess(handler) }
         val descriptor = RunContentDescriptor(console, handler, console.component, title)
         Disposer.register(descriptor, console)

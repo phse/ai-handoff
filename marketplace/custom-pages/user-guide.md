@@ -238,6 +238,8 @@ in a terminal tab in the background and opens the session in an editor tab:
 - While Claude works, a spinner below the last prompt shows it. A prompt you send meanwhile shows grey as *Queued*:
   Claude reads it after its current step and keeps working on the task with it (it does not stop). **Ctrl+Enter** (or
   **Cmd+Enter**) sends it right away instead, like in the terminal: Claude stops its current step and answers at once.
+- If the terminal input already holds text (typed there, or an `@file` from *Send to Claude Code*), your prompt would be
+  sent along with it. Send then shows the text as a hint instead; clear it in the terminal (Ctrl+U) or send again.
 - Commands Claude runs in the background show as a grey line *Running in the background* below the last message, and
   the header counts them (*1 background task running*). When one ends, Claude reports back by itself.
 - Slash commands Claude suggests (on their own line or in backticks, e.g. `/compact …` or a skill) become links, also
@@ -285,7 +287,7 @@ remembers that folder, so the session's cards and tab show here; the tab title a
 number of prompts, the first prompt as tooltip). Pick one to continue it (`claude --resume`) in its folder in a new
 editor tab; a session already open in a tab just comes to the front. Both are in **⌘N** / **File | New** and the **⋮** menu.
 
-In PhpStorm 2026.3 the welcome tab (no project open) has a **New Claude Session…** button below *Open*, *New* and
+In the 2026.3 Home window of PhpStorm, IntelliJ IDEA and PyCharm (no project open), the left side has a **New Claude Session…** button below *Open*, *New* and
 *Clone Repository*: choose a folder, and the session opens in an editor tab. **Resume Claude Session…** there lists the
 latest sessions of all folders and continues the one you pick in its folder. Setting up the hooks also adds `~/.claude/commands/show-in-editor.md` (unless you have your own
 command of that name).

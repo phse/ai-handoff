@@ -289,7 +289,7 @@ object SessionEditors {
 
     /** Offene Session-Reiter (Session, Protokoll, Titel) merken, damit sie nach einem Neustart wieder aufgehen. */
     fun save(project: Project) {
-        if (project.isDisposed || project.locationHash in closing) return
+        if (project.isDisposed || project.locationHash in closing || project.locationHash in switching) return
         val lines = FileEditorManager.getInstance(project).openFiles.filterIsInstance<SessionFile>().mapNotNull { f ->
             val id = f.currentSession(project) ?: return@mapNotNull null
             listOf(id, f.transcript.orEmpty(), f.title.orEmpty().replace('\t', ' ').replace('\n', ' '), f.cwd.orEmpty()).joinToString("\t")
@@ -297,13 +297,41 @@ object SessionEditors {
         com.intellij.ide.util.PropertiesComponent.getInstance(project).setList(KEY, lines.ifEmpty { null })
     }
 
-    /** Projekt (oder IDE) schließt gerade - dann Terminals nicht wegräumen, die IDE beendet sie ohnehin. */
-    fun isClosing(project: Project) = project.isDisposed || project.locationHash in closing
+    /**
+     * Branch-Wechsel läuft: Die IDE schließt dabei alle Editor-Reiter und öffnet die des Ziel-Branches („Restore workspace on
+     * branch switch“: BranchContextTracker.branchHasChanged → WorkingContextManager.clearContext/loadContext, nachgelesen in
+     * 2026.1). Session-Reiter sind dort nicht gespeichert - ohne Schutz gingen sie verloren, und mit ihnen die ruhenden
+     * Claude-Terminals.
+     */
+    private val switching: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Projekt (oder IDE) schließt gerade oder der Branch wechselt - dann Terminals nicht wegräumen. */
+    fun isClosing(project: Project) = project.isDisposed || project.locationHash in closing || project.locationHash in switching
 
     fun restore(project: Project) {
         com.intellij.openapi.application.ApplicationManager.getApplication().messageBus.connect(project)
             .subscribe(com.intellij.openapi.project.ProjectManager.TOPIC, object : com.intellij.openapi.project.ProjectManagerListener {
                 override fun projectClosing(p: Project) { if (p === project) closing += project.locationHash }
+            })
+        project.messageBus.connect(project).subscribe(com.intellij.openapi.vcs.BranchChangeListener.VCS_BRANCH_CHANGED,
+            object : com.intellij.openapi.vcs.BranchChangeListener {
+                private var open: List<SessionFile> = emptyList()
+                override fun branchWillChange(branchName: String) {
+                    open = FileEditorManager.getInstance(project).openFiles.filterIsInstance<SessionFile>()
+                    switching += project.locationHash
+                }
+                override fun branchHasChanged(branchName: String) {
+                    // Das Umschalten der Reiter läuft danach als eigene Transaktion auf dem EDT - etwas warten, dann die
+                    // verlorenen Session-Reiter (dieselben Dateien samt Terminal) wieder öffnen.
+                    val files = open; open = emptyList()
+                    javax.swing.Timer(1500) {
+                        if (project.isDisposed) return@Timer
+                        val manager = FileEditorManager.getInstance(project)
+                        files.filter { it !in manager.openFiles }.forEach { OpenFileDescriptor(project, it).navigate(false) }
+                        switching -= project.locationHash
+                        save(project)
+                    }.apply { isRepeats = false; start() }
+                }
             })
         val lines = com.intellij.ide.util.PropertiesComponent.getInstance(project).getList(KEY).orEmpty()
         if (lines.isEmpty()) return
@@ -1310,6 +1338,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
             SessionEditors.resume(project, file, id, text); return
         }
         val tab = file.tab
+        // Steht im Terminal schon Text (z. B. ein "@datei" von „Send to Claude Code“), ginge er mit diesem Prompt ab: erst warnen,
+        // ein zweites Senden mit demselben Text im Terminal schickt trotzdem.
+        val typed = if (tab != null && terminalOpen) SessionTerminals.typedInput(project, tab) else null
+        if (typed != null && typed != warnedTyped) {
+            warnedTyped = typed
+            hint.text = "The terminal input already holds \"${typed.take(60)}\" - it would be sent along. Clear it there (Ctrl+U) or send again."
+            return
+        }
+        warnedTyped = null
         val ok = when {
             tab != null && terminalOpen -> if (now) SessionTerminals.sendNow(project, tab, text) else SessionTerminals.send(project, tab, text)
             else -> sessionId?.let { sessions.reply(it, text) } == true
@@ -1618,6 +1655,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
             else -> "Send when Claude is done, or type in the terminal."
         }
     }
+
+    /** Text im Terminal-Eingabefeld, vor dem [send] schon gewarnt hat. */
+    private var warnedTyped: String? = null
 
     /** Vorschlag von Claude Code für den nächsten Prompt (grau im leeren Feld, Tab übernimmt ihn). */
     private var suggestion: String? = null

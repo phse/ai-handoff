@@ -58,8 +58,12 @@
     <depends optional="true" config-file="handoff-vcs.xml">com.intellij.platform.vcs</depends>
     <!-- Claude-Sessions im Terminal der IDE (neues Terminal): starten und Eingaben schicken. -->
     <depends>org.jetbrains.plugins.terminal</depends>
-    <!-- Knopf "New Claude Session…" im Start-Dialog von 2026.3 (nur, wo der nicht-modale Welcome-Reiter existiert). -->
+    <!-- Knöpfe "New/Resume Claude Session…" im Home window ab 2026.3 (Modul intellij.platform.ide.nonModalWelcomeScreen, intern -
+         nur über das Customization-Plugin der IDE erreichbar, das es mitbringt; laut intellij-community: IDEA und PyCharm).
+         Rider hat das Fenster auch, sein Plugin ist nicht öffentlich. -->
     <depends optional="true" config-file="handoff-welcome.xml">com.intellij.phpstorm.customization</depends>
+    <depends optional="true" config-file="handoff-welcome-idea.xml">com.intellij.idea.customization</depends>
+    <depends optional="true" config-file="handoff-welcome-pycharm.xml">intellij.pycharm.community.customization.shared</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="app.heckit.ide.aihandoff.ScreenshotTrigger"/>
