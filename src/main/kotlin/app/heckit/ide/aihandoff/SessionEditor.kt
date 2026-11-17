@@ -7,6 +7,7 @@ import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorPolicy
 import com.intellij.openapi.fileEditor.FileEditorProvider
 import com.intellij.openapi.fileEditor.FileEditorState
@@ -296,6 +297,9 @@ object SessionEditors {
         com.intellij.ide.util.PropertiesComponent.getInstance(project).setList(KEY, lines.ifEmpty { null })
     }
 
+    /** Projekt (oder IDE) schließt gerade - dann Terminals nicht wegräumen, die IDE beendet sie ohnehin. */
+    fun isClosing(project: Project) = project.isDisposed || project.locationHash in closing
+
     fun restore(project: Project) {
         com.intellij.openapi.application.ApplicationManager.getApplication().messageBus.connect(project)
             .subscribe(com.intellij.openapi.project.ProjectManager.TOPIC, object : com.intellij.openapi.project.ProjectManagerListener {
@@ -311,6 +315,8 @@ object SessionEditors {
                 if (manager.openFiles.any { it is SessionFile && it.currentSession(project) == id }) continue
                 OpenFileDescriptor(project, SessionFile(null, id, parts.getOrNull(1)?.ifBlank { null }, parts.getOrNull(2)?.ifBlank { null }, parts.getOrNull(3)?.ifBlank { null })).navigate(false)
             }
+            // Vom Terminal wiederhergestellte, leere Claude-Reiter des letzten Laufs gleich wegräumen.
+            SessionTerminals.closeOrphans(project)
         }, project.disposed)
     }
 }
@@ -436,7 +442,23 @@ object SessionLinks {
     }
 
     private val SEGMENT = Regex("(<[^>]+>)|([^<]+)")
-    private val URL = Regex("""https?://[^\s<>"'`)\]]+[^\s<>"'`)\].,;:!?]""")
+    // Klammern gehören zur Adresse, solange sie paarig sind (TYPO3: edit[pages][5693]=edit, Wikipedia: Foo_(Bar)) - eine
+    // schließende ohne öffnende am Ende ist Satzzeichen ("(siehe https://x.de)"). Abschneiden übernimmt [trimUrl] (2026-11-17).
+    private val URL = Regex("""https?://[^\s<>"'`]+""")
+
+    private fun trimUrl(raw: String): String {
+        var u = raw
+        while (u.isNotEmpty()) {
+            val last = u.last()
+            u = when {
+                last in ".,;:!?" -> u.dropLast(1)
+                last == ')' && u.count { it == ')' } > u.count { it == '(' } -> u.dropLast(1)
+                last == ']' && u.count { it == ']' } > u.count { it == '[' } -> u.dropLast(1)
+                else -> return u
+            }
+        }
+        return u
+    }
     private val PATH = Regex("""(?<![\w/.~-])(~?/[\w.@%+-]+(?:/[\w.@%+-]+)+(?::\d+)?)""")
 
     private fun a(href: String, inner: String) = "<a href=\"${StringUtil.escapeXmlEntities(href)}\">$inner</a>"
@@ -462,7 +484,7 @@ object SessionLinks {
             }
             var text = m.groupValues[2]
             if (inLink == 0 && inPre == 0) {
-                text = URL.replace(text) { u -> a(StringUtil.unescapeXmlEntities(u.value), u.value) }
+                text = URL.replace(text) { u -> val t = trimUrl(u.value); a(StringUtil.unescapeXmlEntities(t), t) + u.value.substring(t.length) }
                 // Pfade nur außerhalb der eben gesetzten Links.
                 text = text.split(Regex("(?=<a )|(?<=</a>)")).joinToString("") { part ->
                     if (part.startsWith("<a ")) part
@@ -1243,7 +1265,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val sessionId get() = file.currentSession(project)
     private val terminalOpen get() = file.tab?.let { SessionTerminals.isOpen(project, it) } == true
     /** Vorschläge für Slash-Befehle - nur, wenn sie die Session erreichen (Terminal). */
-    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }, enabled = { terminalOpen })
+    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }, enabled = { terminalOpen }, workDir = { baseDir() })
 
     /**
      * Diktat und Eingabemethode zurücksetzen, bevor das Feld geleert wird: Nach einem diktierten und abgeschickten Prompt
@@ -1277,6 +1299,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private fun send(now: Boolean = false) {
         val shown = input.text.trim().takeIf { it.isNotEmpty() } ?: return
+        if (resumeFromTab(shown)) return
         val text = expanded(shown)
         endDictation()
         watchKeys = true
@@ -1296,6 +1319,29 @@ private class SessionEditor(private val project: Project, private val file: Sess
             pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
         }
         else hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
+    }
+
+    /**
+     * `/resume` nicht ans Terminal geben: Claude Code öffnet dort eine Auswahl bzw. wechselt das Protokoll, das der Reiter
+     * nicht mehr verfolgt - der Prompt blieb ewig "Queued" (2026-11-17). Stattdessen die gewählte Session in einem eigenen
+     * Reiter fortsetzen; ohne eindeutigen Treffer die Liste zeigen.
+     */
+    private fun resumeFromTab(text: String): Boolean {
+        val m = Regex("^/resume(?:\\s+(.*))?$").matchEntire(text) ?: return false
+        val q = m.groupValues[1].trim()
+        val sessions = RecentSessions.list(project, baseDir())
+        val hit = sessions.firstOrNull { it.name == q }
+            ?: sessions.filter { q.isNotEmpty() && (it.name.startsWith(q) || it.description.equals(q, ignoreCase = true)) }.singleOrNull()
+            ?: sessions.filter { q.isNotEmpty() && it.description.contains(q, ignoreCase = true) }.singleOrNull()
+        if (hit == null) {
+            if (input.text.trim() == "/resume") input.text = "/resume "
+            input.requestFocusInWindow(); input.caretPosition = input.document.length
+            hint.text = if (sessions.isEmpty()) "No earlier sessions in this folder." else "Pick a session from the list (type to filter)."
+            return true
+        }
+        input.text = ""
+        SessionEditors.resumeOld(project, hit.name, RecentSessions.cwds[hit.name] ?: baseDir() ?: project.basePath.orEmpty())
+        return true
     }
 
     /** Arbeitsordner der Session für relative Pfade, sonst der Projektordner. */
@@ -1327,6 +1373,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             }
         }
         transcript?.title?.takeIf { it != file.title }?.let { file.title = it; updateTabTitle(); SessionEditors.save(project) }
+        file.title?.let { t -> file.tab?.let { SessionTerminals.rename(project, it, TerminalBridge.TAB_NAME + " " + StringUtil.shortenTextWithEllipsis(t, 30, 0)) } }
         // Ordner, in dem die Session gestartet wurde - die Hooks melden den aktuellen (folgt jedem `cd` von Claude), und
         // `claude --resume` findet die Session nur im Startordner (2026-11-15: Resume landete im Unterordner).
         (path?.let { SessionEditors.startDir(it) } ?: info?.cwd?.takeIf { file.cwd == null })
@@ -1607,7 +1654,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
         slash.hide()
         com.intellij.openapi.util.Disposer.dispose(cards)
         // Nach dem Schließen dieses Reiters (nicht beim Schließen des Projekts) die Liste ohne ihn neu schreiben.
-        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({ SessionEditors.save(project) }, project.disposed)
+        // Ruht Claude, auch den Terminal-Reiter schließen - sonst sammeln sich dort unzählige "Claude"-Reiter (2026-11-17). Die
+        // Session lässt sich per /resume wieder öffnen; arbeitet Claude gerade, bleibt das Terminal offen.
+        val tab = file.tab.takeIf { !file.busy && !SessionEditors.isClosing(project) }
+        ApplicationManager.getApplication().invokeLater({
+            SessionEditors.save(project)
+            if (tab != null && FileEditorManager.getInstance(project).openFiles.none { it is SessionFile && it.tab == tab }) SessionTerminals.close(project, tab)
+        }, project.disposed)
     }
 
     companion object {

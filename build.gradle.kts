@@ -69,6 +69,14 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.6.2</h3>
+            <ul>
+              <li><code>/resume</code> in the session tab lists the sessions of the working folder too (e.g. from the IDE's home
+                  project) and resumes the chosen one in its own tab instead of the terminal picker.</li>
+              <li>Terminal tabs are named <i>Claude (Handoff) &lt;title&gt;</i>. Closing an idle session tab closes its terminal;
+                  empty Handoff terminal tabs left after an IDE restart are cleaned up. Other terminal tabs are never touched.</li>
+              <li>Web links with brackets, like <code>edit[pages][5693]=edit</code>, are linked completely.</li>
+            </ul>
             <h3>1.6.1</h3>
             <ul>
               <li>Permission prompts in the session tab show the full command (or file) Claude wants to run above Yes/No.</li>

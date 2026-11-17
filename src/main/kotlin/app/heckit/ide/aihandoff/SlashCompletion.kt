@@ -109,11 +109,20 @@ object SlashCommands {
 object RecentSessions {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, SlashCommand>>()
 
-    fun list(project: Project, limit: Int = 30): List<SlashCommand> {
-        val base = project.basePath ?: return emptyList()
-        val dir = File(System.getProperty("user.home"), ".claude/projects/" + base.replace(Regex("[^A-Za-z0-9]"), "-"))
+    /** Arbeitsordner je Session-ID (aus dem Ordnernamen nicht sicher rückrechenbar - Claude Code ersetzt jedes Sonderzeichen). */
+    val cwds = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Sessions des Projektordners und des Arbeitsordners der laufenden Session ([workDir]) - eine Session aus PhpStorm Home
+     * arbeitet meist in einem anderen Ordner als dem Projekt (2026-11-17: /resume zeigte dort nichts).
+     */
+    fun list(project: Project, workDir: String? = null, limit: Int = 30): List<SlashCommand> {
         val time = java.text.SimpleDateFormat("dd.MM. HH:mm")
-        return dir.listFiles { f -> f.extension == "jsonl" }.orEmpty().sortedByDescending { it.lastModified() }.take(limit).map { f ->
+        val files = listOfNotNull(project.basePath, workDir).map { it.trimEnd('/') }.distinct().flatMap { base ->
+            val dir = File(System.getProperty("user.home"), ".claude/projects/" + base.replace(Regex("[^A-Za-z0-9]"), "-"))
+            dir.listFiles { f -> f.extension == "jsonl" }.orEmpty().onEach { cwds.putIfAbsent(it.nameWithoutExtension, base) }.toList()
+        }
+        return files.sortedByDescending { it.lastModified() }.take(limit).map { f ->
             // Protokolle sind groß - Ergebnis je Datei und Änderungszeit merken, sonst liest jeder Tastendruck alles neu.
             cache[f.path]?.takeIf { it.first == f.lastModified() }?.let { return@map it.second }
             var title: String? = null
@@ -142,6 +151,8 @@ class SlashCompletion(
     /** Kurze Marke für eine per `@` gewählte Datei (geht beim Senden als `@pfad` raus). */
     private val fileToken: (String) -> String = { "@$it" },
     private val enabled: () -> Boolean,
+    /** Arbeitsordner der Session - für `/resume` (Sessions dieses Ordners). */
+    private val workDir: () -> String? = { null },
 ) {
     private val model = javax.swing.DefaultListModel<SlashCommand>()
     private val list = JBList(model).apply {
@@ -207,9 +218,9 @@ class SlashCompletion(
     private fun update() {
         val text = area.text
         if (!area.isShowing) return hide()
-        if (enabled()) Regex("^/resume\\s+(\\S*)$").find(text)?.let { m ->
-            val q = m.groupValues[1]
-            val sessions = RecentSessions.list(project).filter { q.isEmpty() || it.name.startsWith(q) || it.description.contains(q, ignoreCase = true) }
+        if (enabled()) Regex("^/resume\\s+(.*)$").find(text)?.let { m ->
+            val q = m.groupValues[1].trim()
+            val sessions = RecentSessions.list(project, workDir()).filter { q.isEmpty() || it.name.startsWith(q) || it.description.contains(q, ignoreCase = true) }
             if (sessions.isEmpty()) return hide()
             resumeMode = true; slashAt = 0
             model.clear(); sessions.forEach(model::addElement)

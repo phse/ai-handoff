@@ -62,6 +62,14 @@ object SessionTerminals {
     /** Normales Terminal (ohne Claude) in einem Ordner. */
     fun shell(project: Project, dir: String) { guard("shell") { bridge(project).shell(dir) } }
 
+    /** Terminal-Reiter schließen (beendet Claude dort; die Session lässt sich später fortsetzen). */
+    fun closeOrphans(project: Project) { if (available) guard("orphans") { bridge(project).closeOrphans() } }
+
+    fun close(project: Project, tab: String) { guard("close") { bridge(project).close(tab) } }
+
+    /** Terminal-Reiter nach der Session benennen statt "Claude" - sonst sind viele Reiter nicht zu unterscheiden. */
+    fun rename(project: Project, tab: String, name: String) { guard("rename") { bridge(project).rename(tab, name) } }
+
     fun show(project: Project, tab: String) { guard("show") { bridge(project).show(tab) } }
 
     /**
@@ -85,14 +93,31 @@ class TerminalBridge(private val project: Project) {
 
     fun hasTabs() = tabs.isNotEmpty()
 
-    private companion object { const val ENTER_DELAY_MS = 250 }
+    companion object {
+        private const val ENTER_DELAY_MS = 250
+        /** Namenskonvention für Handoffs Terminal-Reiter - nur solche räumt [closeOrphans] weg, nie "Claude" o. Ä. des Nutzers. */
+        const val TAB_NAME = "Claude (Handoff)"
+    }
+
+    /**
+     * Verwaiste Claude-Reiter schließen: Nach einem IDE-Neustart stellt das Terminal unsere Reiter ("Claude (Handoff) …") als
+     * leere Shells wieder her - Claude läuft darin nicht mehr, [Resume] startet einen neuen Reiter, die alten blieben stehen.
+     * Nur Reiter mit unserem Namen, die wir in dieser Sitzung nicht selbst geöffnet haben.
+     */
+    fun closeOrphans() {
+        val manager = TerminalToolWindowTabsManager.getInstance(project)
+        val ours = tabs.values.toSet()
+        manager.tabs.filter { t -> t !in ours && t.content.displayName.let { it == TAB_NAME || it.startsWith("$TAB_NAME ") } }
+            .forEach { manager.closeTab(it) }
+    }
 
     fun start(command: String, dir: String?): String {
+        closeOrphans()
         val id = UUID.randomUUID().toString()
         val tab = TerminalToolWindowTabsManager.getInstance(project).createTabBuilder()
             .workingDirectory(dir)
             .envVariables(mapOf("HANDOFF_TAB" to id))
-            .tabName("Claude")
+            .tabName(TAB_NAME)
             .requestFocus(false)
             // Sonst startet die Shell erst, wenn jemand das Terminal-Fenster öffnet - es soll im Hintergrund bleiben.
             .deferSessionStartUntilUiShown(false)
@@ -153,6 +178,17 @@ class TerminalBridge(private val project: Project) {
     fun shell(dir: String) {
         TerminalToolWindowTabsManager.getInstance(project).createTabBuilder().workingDirectory(dir).createTab()
         ToolWindowManager.getInstance(project).getToolWindow("Terminal")?.activate(null)
+    }
+
+    fun close(id: String) {
+        val tab = tabs[id]?.takeIf { isOpen(id) } ?: return
+        tabs.remove(id)
+        TerminalToolWindowTabsManager.getInstance(project).closeTab(tab)
+    }
+
+    fun rename(id: String, name: String) {
+        val tab = tabs[id]?.takeIf { isOpen(id) } ?: return
+        if (tab.content.displayName != name) tab.content.displayName = name
     }
 
     fun show(id: String) {

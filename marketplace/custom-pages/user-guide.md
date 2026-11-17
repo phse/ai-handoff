@@ -214,7 +214,8 @@ in a terminal tab in the background and opens the session in an editor tab:
 - At the bottom, a field for your prompt: **Enter** sends it, **Shift+Enter** adds a line. It goes to the terminal as
   if you had typed it, so slash commands like `/clear` or `/compact` work too. After `/clear` the tab follows the new
   session.
-- `/resume ` (with a space) lists the project's earlier sessions by title and time; pick one to get `/resume <id>`.
+- `/resume ` (with a space) lists earlier sessions of the project and of the session's working folder by title and time;
+  type to filter, pick one and press Enter: it continues in its own tab (`claude --resume`), not in this terminal.
 - Type `/` in the prompt field: a list suggests slash commands (built-in ones, your commands and skills, those of your
   plugins), also in the middle of a prompt after a space. **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes
   it for this `/`; a space or letters that match no command close it too. Only where slash commands reach the session.
