@@ -29,6 +29,8 @@
   <li><b>Claude sessions in editor tabs</b>: start Claude Code from the IDE and work with it in an editor tab, the
       conversation formatted, prompts and slash commands sent to the terminal in the background. <code>/show-in-editor</code>
       opens a running session there.</li>
+  <li><b>Session logs (.jsonl)</b>: Claude Code's transcripts open as a readable conversation instead of raw JSON (switch
+      to <i>Text</i> at the bottom), with tool steps, errors and changed files; resume one in a new tab or export it as Markdown.</li>
   <li><b>Questions with options</b>: Claude asks as a card, one answer or several, plus your own answer.</li>
   <li><b>Notifications</b> when something is waiting while the IDE is in the background.</li>
   <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging

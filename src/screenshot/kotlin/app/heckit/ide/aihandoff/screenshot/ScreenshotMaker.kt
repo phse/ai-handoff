@@ -111,7 +111,7 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "03-viewer.png"))
+            ImageIO.write(image, "png", File(out, "04-viewer.png"))
         }
         edt { dialog?.close(1) }
         Thread.sleep(1000)
@@ -124,7 +124,7 @@ object ScreenshotMaker {
             memory.expand("f:" + File(base, "CLAUDE.md").path)
         }
         Thread.sleep(3000)
-        shot(frame, File(out, "04-memory.png"))
+        shot(frame, File(out, "05-memory.png"))
 
         // 4: Usage
         val usage = edt { tw.contentManager.contents[2].component as UsagePanel }
@@ -133,7 +133,7 @@ object ScreenshotMaker {
             usage.refresh()
         }
         Thread.sleep(3000)
-        shot(frame, File(out, "05-usage.png"))
+        shot(frame, File(out, "06-usage.png"))
 
         // 6: Ablauf aus mehreren Befehlen und eine wartende Claude-Session (vor Szene 5, die den Diff öffnet)
         val waitingFile = File(app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }, "handoff-demo.json")
@@ -153,7 +153,7 @@ object ScreenshotMaker {
             tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
         }
         Thread.sleep(4000)
-        shot(frame, File(out, "07-sequence.png"))
+        shot(frame, File(out, "08-sequence.png"))
         waitingFile.delete(); listenFile.delete()
         Thread.sleep(2500)
 
@@ -178,7 +178,7 @@ object ScreenshotMaker {
             tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
         }
         Thread.sleep(2500)
-        shot(frame, File(out, "08-ask.png"))
+        shot(frame, File(out, "09-ask.png"))
 
         // 8: Handoff Tools (Dialog als eigenes Bild)
         var tools: app.heckit.ide.aihandoff.ToolsDialog? = null
@@ -195,13 +195,14 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "09-tools.png"))
+            ImageIO.write(image, "png", File(out, "10-tools.png"))
         }
         edt { tools?.close(1) }
         Thread.sleep(1000)
 
         // 9: Session im Editor-Reiter - Verlauf, Links, eine Frage als Karte im Gespräch, Feld für den nächsten Prompt
         sessionScene(project, base, out, tw, frame)
+        logScene(project, base, out, tw, frame)
 
         // 5: Änderungen prüfen - Diff mit Zeilennotizen
         val cart = File(base, "src/cart.js")
@@ -241,8 +242,73 @@ object ScreenshotMaker {
                 } ?: log.warn("Handoff: no diff editor for the hover")
         }
         Thread.sleep(1000)
-        shot(frame, File(out, "06-review.png"))
+        shot(frame, File(out, "07-review.png"))
         log.warn("Handoff: screenshots written to $out")
+    }
+
+    /**
+     * Eine `.jsonl` aus dem Projekt öffnet als lesbare Session (Umschalter "Claude Session | Text" unten): Projektbaum mit
+     * der Datei, daneben die Ansicht mit aufgeklappten Werkzeugschritten.
+     */
+    private fun logScene(project: Project, base: File, out: File, tw: com.intellij.openapi.wm.ToolWindow, frame: JFrame) {
+        val logs = File(base, "logs").apply { mkdirs() }
+        val log = File(logs, "checkout-refactoring.jsonl")
+        val sid = "3f6c2a1e-8b4d-4c1a-9e2f-7a5b6c8d9e01"
+        fun str(t: String) = com.google.gson.JsonPrimitive(t).toString()
+        var n = 0
+        fun ts() = "\"timestamp\":\"2026-11-12T09:%02d:00Z\"".format(n++)
+        fun user(t: String) = """{"type":"user","sessionId":"$sid",${ts()},"message":{"role":"user","content":${str(t)}}}"""
+        fun text(t: String) = """{"type":"assistant","sessionId":"$sid",${ts()},"message":{"role":"assistant","content":[{"type":"text","text":${str(t)}}]}}"""
+        fun tool(id: String, name: String, key: String, value: String) =
+            """{"type":"assistant","sessionId":"$sid",${ts()},"message":{"role":"assistant","content":[{"type":"tool_use","id":"$id","name":"$name","input":{"$key":${str(value)}}}]}}"""
+        fun result(id: String, out: String, error: Boolean = false) =
+            """{"type":"user","sessionId":"$sid",${ts()},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"$id","is_error":$error,"content":${str(out)}}]}}"""
+        log.writeText(listOf(
+            user("Split the checkout total into its own module and keep the tests green"),
+            tool("t1", "Read", "file_path", "${base.path}/src/cart.js"),
+            result("t1", "export function cartTotal(items, discountPercent = 0) { … }"),
+            tool("t2", "Write", "file_path", "${base.path}/src/checkout.js"),
+            result("t2", "File created"),
+            tool("t3", "Bash", "command", "npm test"),
+            result("t3", "FAIL test/cart.test.js\n  ● cartTotal › adds shipping below the threshold\n    Cannot find module '../src/total'", true),
+            tool("t4", "Edit", "file_path", "${base.path}/test/cart.test.js"),
+            result("t4", "Updated the import"),
+            tool("t5", "Bash", "command", "npm test"),
+            result("t5", "Tests: 24 passed, 24 total"),
+            text("Done. `cartTotal` now lives in `src/checkout.js`; `src/cart.js` re-exports it, so nothing else changes.\n\n" +
+                "- one test imported the old path, fixed\n- all **24 tests** pass"),
+            user("Export it as Markdown for the ticket"),
+            text("Use **Export Session as Markdown…** in the tab's context menu."),
+            """{"type":"ai-title","sessionId":"$sid","aiTitle":"Checkout refactoring"}""",
+        ).joinToString("\n") + "\n")
+        // Außerhalb des EDT auffrischen - im EDT meldete TransactionGuard einen Fehler (Hinweis "IDE error occurred" im Bild).
+        val vf = com.intellij.openapi.vfs.LocalFileSystem.getInstance().refreshAndFindFileByIoFile(log) ?: return
+        edt {
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).let { m -> m.openFiles.forEach(m::closeFile) }
+            tw.hide()
+            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf).navigate(true)
+            ToolWindowManager.getInstance(project).getToolWindow("Project")?.show()
+            com.intellij.ide.projectView.ProjectView.getInstance(project).select(null, vf, false)
+        }
+        Thread.sleep(4000)
+        edt {
+            com.intellij.notification.NotificationsManager.getNotificationsManager()
+                .getNotificationsOfType(com.intellij.notification.Notification::class.java, project).forEach { it.expire() }
+            // Den Fehlschlag aufklappen: ein Werkzeugschritt mit Ein- und Ausgabe.
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).selectedEditor?.component?.let { root ->
+                com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
+                    .filter { it.text.orEmpty().contains("Week") }.forEach { it.text = "5h 12 %  ·  Week 34 %" }
+            }
+        }
+        Thread.sleep(800)
+        shot(frame, File(out, "03-session-log.png"))
+        edt {
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).let { m -> m.openFiles.forEach(m::closeFile) }
+            ToolWindowManager.getInstance(project).getToolWindow("Project")?.hide()
+            tw.show()
+        }
+        log.delete(); logs.delete()
+        Thread.sleep(1000)
     }
 
     private fun sessionScene(project: Project, base: File, out: File, tw: com.intellij.openapi.wm.ToolWindow, frame: JFrame) {

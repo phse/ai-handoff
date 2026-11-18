@@ -69,6 +69,11 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.9.1</h3>
+            <ul>
+              <li>The description and the guide now cover session logs: any Claude Code <code>.jsonl</code> transcript opens as a
+                  readable conversation (<i>Text</i> at the bottom shows the file), with resume and Markdown export.</li>
+            </ul>
             <h3>1.9.0</h3>
             <ul>
               <li>Slash list: values from the <code>argument-hint</code> of commands and skills (also your own, e.g.

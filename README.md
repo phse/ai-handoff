@@ -43,6 +43,9 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   works, clickable links (files, folders, web pages, settings, IDE actions), images by drag and drop or paste with marked
   areas, Handoff cards and plan limits in the tab, and **Resume** after a restart. `/show-in-editor` opens a running
   session there. Uses the IDE's terminal API, which JetBrains marks as experimental.
+- **Session logs (.jsonl)**: Claude Code's transcripts (`~/.claude/projects/…`, or any `.jsonl` with a `sessionId`) open as
+  a readable conversation instead of raw JSON, with tool steps, errors and changed files; **Text** at the bottom shows the
+  file itself. **Resume in New Tab** continues the session, **Export Session as Markdown…** saves it.
 - **Questions with options**: Claude asks one or more questions as a card (Back/Next), one answer or several
   (`multiSelect`) per question, each option with a short description, plus a field for an own answer.
 - **Handoff Tools**: calls per tool; per tool a switch for the CLAUDE.md instruction (Claude edits the file on request)

@@ -217,8 +217,11 @@ in a terminal tab in the background and opens the session in an editor tab:
   Several tool calls in a row fold into one line ("▸ 12 steps" and the last step); click it to see them all, and click
   a step to see its input and output. Your prompts show as speech bubbles with the time in the top right corner; errors,
   durations and changed files show as grey lines. Older entries load on demand, **⌘F** searches the conversation.
-- **Open Session Log (.jsonl)** opens the raw transcript in a readable view; **Export Session as Markdown…** saves the
+- **Open Session Log (.jsonl)** opens the session's transcript file; **Export Session as Markdown…** saves the
   conversation as a Markdown file.
+- Any Claude Code transcript (`.jsonl` under `~/.claude/projects`, or elsewhere with a `sessionId` in its first line)
+  opens as this readable view instead of raw JSON; **Text** at the bottom of the editor shows the file itself, **Resume in
+  New Tab** continues the session.
 - The tab is named after the session ("New Session" until Claude Code gives it a title). The header shows the
   session's folder (click to reveal it), the tab's tooltip too; after `/cd` it follows the new folder.
 - At the bottom, a field for your prompt: **Enter** sends it, **Shift+Enter** adds a line. It goes to the terminal as
