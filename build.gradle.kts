@@ -69,6 +69,21 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.8.0</h3>
+            <ul>
+              <li>Session tab: prompts as speech bubbles with the time, tool steps open with input and output, errors, durations
+                  and changed files as grey lines, older entries on demand, <b>⌘F</b> to search.</li>
+              <li><b>Open Session Log (.jsonl)</b> shows the raw transcript readable; <b>Export Session as Markdown…</b>.</li>
+              <li>The header tooltip shows status, folder, model, effort, context and each plan limit with its reset time;
+                  plan limits stay when a fresh session reports none.</li>
+              <li>Drawings go into the prompt as a short <i>[Drawing #2]</i> instead of a long cache path.</li>
+              <li>Notes: the <b>+</b> works in one-sided diffs too, one note per line, and <b>Send to Claude…</b> on the notes card
+                  sends them to a running or a new session.</li>
+              <li>Cards: <b>✕</b> on hover, <b>Dismiss All Claude Messages</b>, option <i>Remove Cards on Dismiss</i>; with the session
+                  tab in front, its cards show there only.</li>
+              <li>Sessions of other IDEs and projects no longer show up as cards.</li>
+              <li>Fixes: the first Enter after switching files no longer warns about editor hints in the terminal input.</li>
+            </ul>
             <h3>1.7.1</h3>
             <ul>
               <li>The plugin icon shows again in the Marketplace and the Plugins dialog.</li>

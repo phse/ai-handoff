@@ -65,10 +65,15 @@ object PlanLimits {
 
     private fun shellQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
+    @Volatile private var lastRateLimits: JsonObject? = null
+
     fun read(): Limits? {
         if (!data.isFile) return null
         val o = runCatching { JsonParser.parseString(data.readText()).asJsonObject }.getOrNull() ?: return null
-        val rl = o.getAsJsonObject("rate_limits") ?: return Limits(null, null, Instant.ofEpochMilli(data.lastModified()))
+        // Nicht jede Session liefert rate_limits (z. B. gleich nach dem Start, vor der ersten Antwort) - dann die zuletzt
+        // gesehenen Werte behalten, statt 5h/Woche verschwinden zu lassen (2026-11-18).
+        val rl = o.getAsJsonObject("rate_limits")?.also { lastRateLimits = it } ?: lastRateLimits
+            ?: return Limits(null, null, Instant.ofEpochMilli(data.lastModified()))
         fun window(k: String): Window? {
             val w = rl.getAsJsonObject(k) ?: return null
             val used = w.get("used_percentage")?.takeIf { it.isJsonPrimitive }?.asDouble ?: return null

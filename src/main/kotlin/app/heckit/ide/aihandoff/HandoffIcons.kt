@@ -38,6 +38,13 @@ object HandoffIcons {
             ?: com.intellij.icons.AllIcons.Actions.Execute
     }
 
+    /** Sprechblase einer Notiz im Zeilenrand: Form wie im Handoff-Symbol (Spitze links unten), ohne Claude-Zeichen. */
+    fun note(): Icon {
+        val path = "/icons/note${if (isDark()) "_dark" else ""}.svg"
+        return synchronized(cache) { cache.getOrPut(path) { url(path)?.let { IconLoader.findIcon(it, false) } } }
+            ?: com.intellij.icons.AllIcons.General.Balloon
+    }
+
     /** 16-px-Symbol für Editor-Reiter (Session, Anleitung, Nachrichten), passend zum Theme. */
     fun editor(): Icon {
         val path = "/icons/expui/toolwindow/handoff${if (isDark()) "_dark" else ""}.svg"

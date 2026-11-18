@@ -111,6 +111,8 @@ class Proposal(
     @Volatile var askSession: String? = null
     /** Claude hat das Ergebnis per handoff_wait_for_result abgeholt. */
     @Volatile var fetched = false
+    /** Per ✕ geschlossen oder nach Dismiss ausgeblendet, aber noch nicht von Claude abgeholt - bleibt für handoff_wait_for_result da. */
+    @Volatile var hidden = false
     /** Session, die gerade arbeitete, als Claude die Karte schickte - an sie geht das Ergebnis, wenn niemand wartet. */
     @Volatile var session: String? = null
     /** [session] ist eindeutig (genau eine Session arbeitete) - nur dann blenden Session-Reiter fremde Karten aus. */
@@ -305,7 +307,15 @@ class HandoffService(private val project: Project) {
     fun dismiss(p: Proposal, note: String?) {
         p.note = note?.takeIf { it.isNotBlank() }
         p.state = Proposal.State.DISMISSED
+        if (Layout.removeOnDismiss) p.hidden = true
         p.done.complete(Unit)
+        fireChanged()
+    }
+
+    /** ✕ an der Karte: offene Karte ablehnen (ohne Notiz), erledigte Karte entfernen. */
+    fun close(p: Proposal) {
+        if (p.isPending) { dismiss(p, null); p.hidden = true; fireChanged(); return }
+        if (p.fetched || p.owner == null) proposals.remove(p) else p.hidden = true
         fireChanged()
     }
 

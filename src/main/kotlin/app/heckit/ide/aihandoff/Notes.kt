@@ -105,7 +105,25 @@ class NotesService(private val project: Project) {
         val old = notes.toList()
         notes.clear()
         old.forEach { if (it.highlighter.isValid) it.highlighter.dispose() }
+        purgeOrphans()
         changed()
+    }
+
+    init { com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({ purgeOrphans() }, project.disposed) }
+
+    /**
+     * Sprechblasen ohne Notiz entfernen: Nach einem Neuladen des Plugins (Update, Sandbox) ist die Liste leer, die Markierungen
+     * der alten Fassung hängen aber noch an den offenen Dokumenten (2026-11-18). Erkannt am Klassennamen, denn die alte Klasse
+     * stammt aus einem anderen Classloader.
+     */
+    private fun purgeOrphans() {
+        val mine = notes.map { it.highlighter }.toSet()
+        com.intellij.openapi.editor.EditorFactory.getInstance().allEditors.map { it.document }.distinct().forEach { doc ->
+            val model = DocumentMarkupModel.forDocument(doc, project, false) ?: return@forEach
+            model.allHighlighters.filter { h ->
+                h !in mine && h.gutterIconRenderer?.javaClass?.name == NoteRenderer::class.java.name
+            }.forEach { it.dispose() }
+        }
     }
 
     /** Text für Claude: je Notiz Pfad (relativ zum Projekt), Zeilen ab 1, Notiz und die Zeile, an der sie hängt. */
@@ -142,7 +160,7 @@ class NotesService(private val project: Project) {
 }
 
 private class NoteRenderer(private val project: Project, private val note: LineNote) : GutterIconRenderer() {
-    override fun getIcon(): Icon = AllIcons.General.Balloon
+    override fun getIcon(): Icon = HandoffIcons.note()
     override fun getTooltipText() = "Note for Claude: " + note.text
     override fun isNavigateAction() = true
     override fun getAlignment() = Alignment.RIGHT
@@ -205,9 +223,20 @@ class AddNoteAction : DumbAwareAction() {
 }
 
 object NotePopup {
-    fun show(project: Project, editor: Editor, line: Int, existing: LineNote?, endLine: Int = line) {
+    private var current: com.intellij.openapi.ui.popup.JBPopup? = null
+
+    /**
+     * [target]: Dokument und Zeile, an die die Notiz gehört, wenn [editor] sie nur anzeigt (einseitiger Diff: eigenes,
+     * zusammengesetztes Dokument); sonst das Dokument des Editors.
+     */
+    fun show(project: Project, editor: Editor, line: Int, given: LineNote?, endLine: Int = line, target: Pair<com.intellij.openapi.editor.Document, Int>? = null) {
+        // Immer nur ein Notizfenster: ein weiterer Klick aufs "+" ersetzt das offene, statt es zu überlagern.
+        current?.takeIf { !it.isDisposed }?.cancel()
         val service = NotesService.getInstance(project)
-        val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
+        val doc = target?.first ?: editor.document
+        val file = FileDocumentManager.getInstance().getFile(doc) ?: return
+        // Eine Notiz je Zeile: Steht dort schon eine, wird sie bearbeitet statt eine zweite angelegt (2026-11-18).
+        val existing = given ?: service.at(file, target?.second ?: line)
         val area = JBTextArea(existing?.text.orEmpty()).apply {
             lineWrap = true; wrapStyleWord = true; border = JBUI.Borders.empty(6)
             emptyText.text = "What should Claude change here?"
@@ -222,11 +251,13 @@ object NotePopup {
             .setRequestFocus(true).setFocusable(true).setMovable(true).setResizable(true)
             .setCancelOnClickOutside(false).setCancelKeyEnabled(true)
             .createPopup()
+        current = popup
         fun save() {
             val text = area.text.trim()
             when {
                 text.isEmpty() -> existing?.let { service.remove(it) }
                 existing != null -> service.update(existing, text)
+                target != null -> service.add(doc, file, target.second, target.second, text)
                 else -> service.add(editor.document, file, line, endLine.coerceAtMost(editor.document.lineCount - 1), text)
             }
             popup.closeOk(null)

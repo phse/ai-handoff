@@ -72,7 +72,8 @@ If the MCP tools handoff_* are available, use them:
 ## The Commands tab
 
 Everything Claude hands over appears here as a card. A card waits until you act on it; Claude fetches the outcome
-(`handoff_wait_for_result`) and goes on. **Clear Finished** (broom icon in the header) removes done cards.
+(`handoff_wait_for_result`) and goes on. **Clear Finished** (broom icon in the header) removes done cards; its menu has **Dismiss All Claude Messages**.
+Hovering a card shows a **✕** to close it.
 
 - **Order:** oldest at the top, newest at the bottom, and the list scrolls to a new card. **Newest Cards on Top** in
   the **⋮** menu turns it around.
@@ -80,6 +81,8 @@ Everything Claude hands over appears here as a card. A card waits until you act 
   don't scroll away. Switch it off with **Pin Claude Messages to the Bottom**.
 - **Nothing waiting:** once Handoff is set up, the empty tab shows a single line - plus a link when your `CLAUDE.md`
   misses instructions for new features.
+- **Session tab in front:** cards of a session whose editor tab is in front show there only, and the card in the
+  tool window offers just **Show in Editor**. Sessions of other IDEs and other projects never show up here.
 
 ### Notifications
 
@@ -171,9 +174,11 @@ its line number. The **+** also appears in normal editors while a review is wait
 (or at any other time) use **Add Note for Claude…** in the context menu. Notes show up as an icon in the
 gutter and as grey text at the end of the line; click the icon to edit or delete one. Then **Approve**, or
 **Send Notes**: Claude gets each note with path, line and the line of code it belongs to. Sent notes are removed.
+The **+** also works in a one-sided diff (new or deleted file); one note per line, a click on the **+** opens it.
 
 You can also leave notes without a review. They wait in a card in the Commands tab until you tell Claude to read them
-(or until the next review). Notes are kept in memory only and are gone after an IDE restart.
+(or until the next review), or send them yourself with **Send to Claude…** on that card: pick a running session or start
+a new one. Notes are kept in memory only and are gone after an IDE restart.
 
 **Tools:** `handoff_request_review`, `handoff_get_notes`, `handoff_wait_for_result`.
 
@@ -226,7 +231,11 @@ is the project folder or below it. Switching the menu item off removes the hooks
 in a terminal tab in the background and opens the session in an editor tab:
 
 - At the top, the conversation from the session's transcript, Claude's messages formatted, tool calls as grey lines.
-  Several tool calls in a row fold into one line ("▸ 12 steps" and the last step); click it to see them all.
+  Several tool calls in a row fold into one line ("▸ 12 steps" and the last step); click it to see them all, and click
+  a step to see its input and output. Your prompts show as speech bubbles with the time in the top right corner; errors,
+  durations and changed files show as grey lines. Older entries load on demand, **⌘F** searches the conversation.
+- **Open Session Log (.jsonl)** opens the raw transcript in a readable view; **Export Session as Markdown…** saves the
+  conversation as a Markdown file.
 - The tab is named after the session ("New Session" until Claude Code gives it a title). The header shows the
   session's folder (click to reveal it), the tab's tooltip too.
 - At the bottom, a field for your prompt: **Enter** sends it, **Shift+Enter** adds a line. It goes to the terminal as
@@ -263,6 +272,8 @@ in a terminal tab in the background and opens the session in an editor tab:
 - Slash commands Claude suggests (on their own line or in backticks, e.g. `/compact …` or a skill) become links, also
   lines in code blocks: **▶** runs the command right away, a click on the command (with ↗) puts it into the prompt
   field without sending it.
+- Hover the header for everything at once: status, folder, model and effort, context use and each plan limit with its
+  reset time.
 - The header shows your plan limits (5 hours, week; reset times as tooltip) and, for the session that last updated the
   status line, model and context use. Needs **Show Plan Limits…** from the Usage tab to be set up.
 - Links in Claude's messages open in the IDE: file paths (absolute or relative, with `:line`), also file names in
@@ -279,7 +290,8 @@ in a terminal tab in the background and opens the session in an editor tab:
   files as *[File #2: name]*), Claude gets the file path and reads the image. A short name acts like one character:
   Backspace removes it whole, the cursor skips over it, and hovering it shows the path (and a preview for images). Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
   draw frames with a note each, and the prompt gets them as pixel areas with the notes. Opening it again shows the frames
-  from the prompt, and saving replaces them.
+  from the prompt, and saving replaces them. Drawings go in as a short *[Drawing #2]* that stands for the copy with your
+  drawing.
 - Waiting Handoff cards (commands to run, questions, reviews, images) show at the end of the conversation too, so you
   can answer there without switching to the tool window. While a session tab is in front, new cards do not pop up
   the tool window.
@@ -350,6 +362,7 @@ The **⋮** menu of the tool window:
 | **Update CLAUDE.md Instructions…** | Lets Claude add the instructions your CLAUDE.md is missing. |
 | **Show When Claude Is Waiting** | Cards for Claude Code sessions that are done or need your input (sets up hooks). |
 | **Pin Claude Messages to the Bottom** | Keeps those cards at the bottom of the Commands tab (on by default). |
+| **Remove Cards on Dismiss** | Dismissed cards are removed instead of staying as done. |
 | **Newest Cards on Top** | Newest card at the top instead of the bottom. |
 
 ## Keeping your CLAUDE.md up to date
@@ -370,6 +383,16 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 ## Version history
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
+
+### 1.8.0
+
+Session tabs read better: prompts as speech bubbles with time, expandable tool steps, ⌘F, session log view and
+Markdown export. Notes can be sent to any session, cards close with ✕, and sessions of other IDEs stay out.
+The header tooltip shows model, effort, context and plan limits in one place.
+
+### 1.7.1
+
+The plugin icon shows again in the Marketplace and the Plugins dialog.
 
 ### 1.7.0
 

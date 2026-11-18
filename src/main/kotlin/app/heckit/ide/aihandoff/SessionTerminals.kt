@@ -109,6 +109,7 @@ class TerminalBridge(private val project: Project) {
     private val tabs = ConcurrentHashMap<String, Any>()
 
     fun hasTabs() = tabs.isNotEmpty()
+    fun owns(id: String) = tabs.containsKey(id)
 
     companion object {
         private const val ENTER_DELAY_MS = 250
@@ -129,7 +130,9 @@ class TerminalBridge(private val project: Project) {
 
     fun start(command: String, dir: String?): String {
         closeOrphans()
-        val id = UUID.randomUUID().toString()
+        // Kennung mit der Prozessnummer der IDE: Die Hook-Daten liegen für alle IDEs im selben Ordner - so erkennt eine
+        // andere IDE (z. B. die Sandbox neben der normalen), dass die Session nicht zu ihr gehört (2026-11-18).
+        val id = "p${ProcessHandle.current().pid()}-" + UUID.randomUUID()
         // Sonst startet die Shell erst, wenn jemand das Terminal-Fenster öffnet - es soll im Hintergrund bleiben.
         val tab = TerminalApi.create(project, dir, mapOf("HANDOFF_TAB" to id), TAB_NAME, background = true)
         tabs[id] = tab

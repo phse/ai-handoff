@@ -66,6 +66,8 @@ class SessionFile(val tab: String?, val sessionId: String?, restoredTranscript: 
     @Volatile var title: String? = restoredTitle
     /** Zuletzt bekanntes Protokoll - nach einem IDE-Neustart gibt es die Hook-Daten der Session oft nicht mehr. */
     @Volatile var transcript: String? = restoredTranscript
+    /** Nur das Protokoll ansehen (`.jsonl` im Editor): ohne Eingabe, unten nur "Resume in New Tab". */
+    var logOnly: Boolean = false
 
     /** Aktuelle Session: im eigenen Terminal die neueste, sonst die feste. */
     fun currentSession(project: Project): String? =
@@ -180,6 +182,8 @@ class SessionTabTitleProvider : EditorTabTitleProvider, DumbAware {
 
 /** Öffnen, Starten und Aufräumen der Session-Reiter. */
 object SessionEditors {
+    /** Letzter Inhalt von statusline.json je Session-ID (Modell, Effort, Kontext) - die Datei kennt nur die zuletzt aktive. */
+    val statusBySession = java.util.concurrent.ConcurrentHashMap<String, com.google.gson.JsonObject>()
     /** Wartet etwas in dieser Session auf den Nutzer: eine Karte von ihr oder eine Freigabe/Rückfrage im Terminal (nicht: fertig). */
     fun needsYou(project: Project, f: SessionFile): Boolean {
         val id = f.currentSession(project) ?: return false
@@ -187,12 +191,15 @@ object SessionEditors {
         return project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty().any { it.id == id && !it.finished }
     }
 
-    /** Schon offenen Reiter der Session zeigen, sonst einen neuen öffnen. */
-    fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true, cwd: String? = null) {
-        val manager = FileEditorManager.getInstance(project)
-        val open = manager.openFiles.filterIsInstance<SessionFile>().firstOrNull { f ->
+    /** Offener Session-Reiter zu Terminal-Reiter oder Session, sonst null. */
+    fun openTab(project: Project, tab: String?, sessionId: String?): SessionFile? =
+        FileEditorManager.getInstance(project).openFiles.filterIsInstance<SessionFile>().firstOrNull { f ->
             (tab != null && f.tab == tab) || (sessionId != null && (f.sessionId == sessionId || f.currentSession(project) == sessionId))
         }
+
+    /** Schon offenen Reiter der Session zeigen, sonst einen neuen öffnen. */
+    fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true, cwd: String? = null) {
+        val open = openTab(project, tab, sessionId)
         OpenFileDescriptor(project, open ?: SessionFile(tab, sessionId, restoredCwd = cwd)).navigate(focus)
         if (focus) com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
     }
@@ -587,8 +594,22 @@ object SessionLinks {
 }
 
 /** Ein Eintrag im Verlauf. */
-class TranscriptEntry(val kind: Kind, val text: String) {
-    enum class Kind { USER, ASSISTANT, TOOL, NOTE, SUMMARY }
+class TranscriptEntry(val kind: Kind, val text: String, val path: String? = null, val line: Int? = null) {
+    /** TOOL: erste Zeile der Fehlermeldung, wenn der Aufruf fehlschlug (`tool_result` mit `is_error`). */
+    @Volatile var error: String? = null
+    /** USER: Zeitpunkt (ms) aus dem Protokoll. */
+    @Volatile var time: Long? = null
+    /** TOOL: ganzer Aufruf und Ergebnis, zum Aufklappen. */
+    @Volatile var detail: String? = null
+    @Volatile var output: String? = null
+    /** IMAGE: Vorschaugröße in px ([path] ist die Bilddatei). */
+    var width = 0
+    var height = 0
+    /**
+     * INFO: graue Statuszeile (Dauer, Away-Summary); DIVIDER: Trennlinie (Compact); FILE: Datei, die die IDE oder der Nutzer
+     * mitgeschickt hat - [path]/[line] als Link.
+     */
+    enum class Kind { USER, ASSISTANT, TOOL, NOTE, SUMMARY, INFO, DIVIDER, FILE, IMAGE }
 }
 
 /**
@@ -610,13 +631,14 @@ class Transcript(val path: String) {
      */
     val background = linkedMapOf<String, String>()
     private val toolLines = HashMap<String, String>()
+    private val toolEntries = HashMap<String, TranscriptEntry>()
 
     /** Neue Zeilen einlesen; true, wenn sich etwas geändert hat. */
     fun update(): Boolean {
         val file = File(path)
         if (!file.isFile) return false
         val length = file.length()
-        if (length < offset) { offset = 0; entries.clear(); background.clear(); toolLines.clear() }
+        if (length < offset) { offset = 0; entries.clear(); background.clear(); toolLines.clear(); toolEntries.clear() }
         if (length == offset) return false
         val bytes = RandomAccessFile(file, "r").use { raf ->
             raf.seek(offset)
@@ -644,19 +666,33 @@ class Transcript(val path: String) {
                     // Endet eine Hintergrund-Aufgabe, während Claude arbeitet, kommt die <task-notification> als eingereihter
                     // Befehl statt als Nutzer-Nachricht - ohne diese Prüfung blieben solche Aufgaben ewig "running" (2026-11-16).
                     TASK_DONE.findAll(prompt).forEach { background.remove(it.groupValues[1]) }
-                    userText(prompt)?.let { entries += it }
+                    userText(prompt)?.let { it.time = time(o); entries += it }
                 }
+                attachment(a)?.let { entries += it }
             }
             // Lokale Slash-Befehle (/rename …) und ihre Ausgabe schreibt Claude Code als "system"/"local_command" - ohne diesen
             // Zweig blieb der Befehl im Tab ewig "Queued", obwohl er längst gelaufen war (2026-11-16).
-            "system" -> if (o.str("subtype") == "local_command") o.str("content")?.let { userText(it) }?.let { entries += it }
+            "system" -> when (o.str("subtype")) {
+                "local_command" -> o.str("content")?.let { userText(it) }?.let { entries += it }
+                "turn_duration" -> o.get("durationMs")?.asLong?.let { entries += TranscriptEntry(TranscriptEntry.Kind.INFO, "⏱ Worked for " + duration(it)) }
+                "compact_boundary" -> {
+                    val m = o.getAsJsonObject("compactMetadata")
+                    val parts = listOfNotNull("Conversation compacted", m?.str("trigger"), m?.get("preTokens")?.asLong?.let { "${(it + 500) / 1000}k tokens" })
+                    entries += TranscriptEntry(TranscriptEntry.Kind.DIVIDER, parts.joinToString(" · "))
+                }
+                // Rückblick, den Claude Code nach einer Pause schreibt.
+                "away_summary" -> o.str("content")?.replace(Regex("\\s*\\(disable recaps[^)]*\\)"), "")?.trim()?.takeIf { it.isNotEmpty() }
+                    ?.let { entries += TranscriptEntry(TranscriptEntry.Kind.INFO, "↩ While you were away: $it") }
+            }
             "user" -> {
                 val content = o.getAsJsonObject("message")?.get("content") ?: return
                 trackBackground(o, content)
+                results(content)
                 val text = texts(content).joinToString("\n").trim()
                 // Zusammenfassung nach /compact: steht als Nutzer-Nachricht im Protokoll, wird eingeklappt gezeigt.
                 if (o.get("isCompactSummary")?.asBoolean == true) { if (text.isNotEmpty()) entries += TranscriptEntry(TranscriptEntry.Kind.SUMMARY, text); return }
-                userText(text)?.let { entries += it }
+                userText(text)?.let { it.time = time(o); entries += it }
+                images(content)
             }
             "assistant" -> {
                 val content = o.getAsJsonObject("message")?.get("content")?.takeIf { it.isJsonArray } ?: return
@@ -668,7 +704,10 @@ class Transcript(val path: String) {
                             val line = toolLine(c.str("name").orEmpty(), c.getAsJsonObject("input"))
                             c.str("id")?.let { toolLines[it] = line }
                             if (c.str("name") == "TaskStop") c.getAsJsonObject("input")?.let { i -> (i.str("task_id") ?: i.str("shell_id"))?.let { background.remove(it) } }
-                            entries += TranscriptEntry(TranscriptEntry.Kind.TOOL, line)
+                            entries += TranscriptEntry(TranscriptEntry.Kind.TOOL, line).also { e ->
+                                e.detail = toolDetail(c.getAsJsonObject("input"))
+                                c.str("id")?.let { toolEntries[it] = e }
+                            }
                             lastTool = fullTool(c.str("name").orEmpty(), c.getAsJsonObject("input"))
                         }
                     }
@@ -685,7 +724,85 @@ class Transcript(val path: String) {
         texts(content).forEach { t -> TASK_DONE.findAll(t).forEach { background.remove(it.groupValues[1]) } }
     }
 
-    private companion object { val TASK_DONE = Regex("<task-notification>\\s*<task-id>([^<]+)</task-id>") }
+    /**
+     * Ergebnisse der Werkzeugaufrufe: zum Aufklappen an die Zeile des Aufrufs; schlug er fehl, bekommt die Zeile die erste
+     * Zeile der Fehlermeldung.
+     */
+    private fun results(content: JsonElement) {
+        if (!content.isJsonArray) return
+        content.asJsonArray.forEach { item ->
+            val c = item.takeIf { it.isJsonObject }?.asJsonObject ?: return@forEach
+            if (c.str("type") != "tool_result") return@forEach
+            val entry = c.str("tool_use_id")?.let { toolEntries[it] } ?: return@forEach
+            val text = c.get("content")?.let { texts(it).joinToString("\n") }.orEmpty()
+            entry.output = clip(text.trimEnd())
+            if (c.get("is_error")?.asBoolean != true) return@forEach
+            entry.error = text.replace(Regex("</?tool_use_error>"), "").lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+                ?.let { StringUtil.shortenTextWithEllipsis(it, 160, 0) } ?: "failed"
+        }
+    }
+
+    /** Dateien, die mit dem nächsten Prompt mitgehen: in der IDE offen oder markiert, per @ angehängt, vom Nutzer geändert. */
+    private fun attachment(a: JsonObject): TranscriptEntry? {
+        val path = a.str("filename") ?: return null
+        val (label, line) = when (a.str("type")) {
+            "opened_file_in_ide" -> "Open in the IDE:" to null
+            "selected_lines_in_ide" -> {
+                val from = a.get("lineStart")?.asInt; val to = a.get("lineEnd")?.asInt
+                (if (from != null && to != null && to != from) "Selected lines $from–$to in" else "Selected line ${from ?: ""} in".replace("  ", " ")) to from
+            }
+            "file" -> "Attached:" to null
+            "edited_text_file" -> "You edited" to null
+            else -> return null
+        }
+        return TranscriptEntry(TranscriptEntry.Kind.FILE, label, path, line)
+    }
+
+    private fun clip(t: String) = if (t.length <= 6000) t else t.take(6000) + "\n… (${t.length - 6000} more characters)"
+
+    /** Aufruf zum Aufklappen: ein Befehl als Text, sonst die Eingabe als JSON. */
+    private fun toolDetail(input: JsonObject?): String? {
+        input ?: return null
+        input.get("command")?.takeIf { it.isJsonPrimitive }?.asString?.let { return clip(it) }
+        return clip(com.google.gson.GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(input))
+    }
+
+    private fun time(o: JsonObject): Long? = o.str("timestamp")?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
+
+    /**
+     * Eingefügte Bilder als Vorschau: Die Daten stehen base64 im Protokoll; Swing-HTML zeigt nur Bilder aus Dateien, deshalb
+     * einmal je Inhalt in den Temp-Ordner schreiben.
+     */
+    private fun images(content: JsonElement) {
+        if (!content.isJsonArray) return
+        content.asJsonArray.forEach { item ->
+            val c = item.takeIf { it.isJsonObject }?.asJsonObject ?: return@forEach
+            if (c.str("type") != "image") return@forEach
+            val src = c.getAsJsonObject("source")?.takeIf { it.str("type") == "base64" } ?: return@forEach
+            val data = src.str("data") ?: return@forEach
+            runCatching {
+                val ext = src.str("media_type")?.substringAfter('/')?.takeIf { it.matches(Regex("[a-z]{3,4}")) } ?: "png"
+                val name = Integer.toHexString(data.hashCode()) + "-" + data.length + "." + ext
+                val f = File(IMAGE_DIR, name)
+                if (!f.isFile) { IMAGE_DIR.mkdirs(); f.writeBytes(java.util.Base64.getMimeDecoder().decode(data)) }
+                val img = javax.imageio.ImageIO.read(f) ?: return@runCatching
+                val scale = minOf(1.0, 240.0 / img.width, 160.0 / img.height)
+                entries += TranscriptEntry(TranscriptEntry.Kind.IMAGE, "image", f.path).also {
+                    it.width = (img.width * scale).toInt().coerceAtLeast(1); it.height = (img.height * scale).toInt().coerceAtLeast(1)
+                }
+            }
+        }
+    }
+
+    private fun duration(ms: Long): String {
+        val s = (ms + 500) / 1000
+        return when { s < 60 -> "$s s"; s < 3600 -> "${s / 60} min ${s % 60} s"; else -> "${s / 3600} h ${s / 60 % 60} min" }
+    }
+
+    private companion object {
+        val IMAGE_DIR = File(System.getProperty("java.io.tmpdir"), "handoff-images")
+        val TASK_DONE = Regex("<task-notification>\\s*<task-id>([^<]+)</task-id>")
+    }
 
     private fun texts(content: JsonElement): List<String> = when {
         content.isJsonPrimitive -> listOf(content.asString)
@@ -749,11 +866,22 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private var pendingBase = 0
     /** Davon per Ctrl+Enter sofort gesendet. */
     private val sentNow = mutableSetOf<String>()
+    /** Abgeschickt, während Claude nichts tat - läuft also gleich, ist nicht vorgemerkt (z. B. /compact per ▶, 2026-11-18). */
+    private val startedIdle = mutableSetOf<String>()
+    /** Vorschlag von Claude Code für den nächsten Prompt (grau im leeren Feld, Tab übernimmt ihn). */
+    // Hier oben deklariert: renderTranscript (und damit applyEmptyText) läuft schon im init (2026-11-18).
+    private var suggestion: String? = null
+    private var baseEmptyText = ""
     /** Aufgeklappte Gruppen von Werkzeug-Schritten (Index des ersten Schritts im Protokoll). */
     private val expanded = mutableSetOf<Int>()
+    /** Aufgeklappte einzelne Werkzeug-Schritte (Index im Protokoll): ganzer Aufruf und Ergebnis. */
+    private val openTools = mutableSetOf<Int>()
+    /** So viele Einträge (die neuesten) zeigen; "Show earlier entries" erhöht. */
+    private var limit = MAX_ENTRIES
 
     /** Stil mit den Farben des aktuellen Themes - nach einem Wechsel neu gebaut (die Farben stehen als Text im CSS). */
-    private fun styledKit() = HTMLEditorKitBuilder().withWordWrapViewFactory().build().also { kit ->
+    private fun styledKit() = HTMLEditorKitBuilder().withViewFactoryExtensions(
+        com.intellij.util.ui.ExtendableHTMLViewFactory.Extensions.WORD_WRAP, BUBBLE).build().also { kit ->
             val fg = UIUtil.getContextHelpForeground()
             val grey = "#%02x%02x%02x".format(fg.red, fg.green, fg.blue)
             val bg = JBColor.namedColor("EditorTabs.underlinedTabBackground", JBColor(0xEEF2F8, 0x2E3440))
@@ -762,10 +890,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
             kit.styleSheet.addRule("h1 { font-size: 140%; } h2 { font-size: 120%; } h3 { font-size: 108%; }")
             kit.styleSheet.addRule("pre { padding: ${JBUI.scale(6)}px; border: 1px solid $grey; }")
             kit.styleSheet.addRule("td, th { padding: 3px ${JBUI.scale(8)}px 3px 0; text-align: left; vertical-align: top; }")
-            kit.styleSheet.addRule(".user { background: $userBg; padding: ${JBUI.scale(6)}px ${JBUI.scale(10)}px; margin-top: ${JBUI.scale(14)}px; }")
+            kit.styleSheet.addRule(".user { padding: ${JBUI.scale(6)}px ${JBUI.scale(10)}px; margin-top: ${JBUI.scale(14)}px; margin-bottom: ${JBUI.scale(3)}px; }")
             kit.styleSheet.addRule(".tool { color: $grey; margin-top: 2px; margin-bottom: 2px; }")
             kit.styleSheet.addRule(".note { color: $grey; }")
+            kit.styleSheet.addRule(".error { color: ${com.intellij.ui.ColorUtil.toHtmlColor(JBColor.namedColor("Label.errorForeground", JBColor(0xC7222D, 0xE55765)))}; }")
+            kit.styleSheet.addRule(".summary { color: $grey; margin-left: 14px; }")
+            kit.styleSheet.addRule(".divider { color: $grey; text-align: center; margin-top: 8px; margin-bottom: 8px; }")
             kit.styleSheet.addRule(".pending { color: $grey; }")
+            kit.styleSheet.addRule(".time { color: $grey; font-size: 90%; padding: 0 0 0 ${JBUI.scale(12)}px; text-align: right; }")
+            kit.styleSheet.addRule("td.prompt { padding: 0; }")
         }
 
     private val pane = JEditorPane().apply {
@@ -785,6 +918,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 input.requestFocusInWindow(); input.caretPosition = input.document.length
                 return@addHyperlinkListener
             }
+            if (link.startsWith(TOOL_LINK)) {
+                link.removePrefix(TOOL_LINK).toIntOrNull()?.let { if (!openTools.remove(it)) openTools += it; renderTranscript(force = false) }
+                return@addHyperlinkListener
+            }
+            if (link == MORE_LINK) { limit += MAX_ENTRIES; renderTranscript(force = false); SwingUtilities.invokeLater { scroll.verticalScrollBar.value = 0 }; return@addHyperlinkListener }
             if (link.startsWith(STEPS_LINK)) {
                 link.removePrefix(STEPS_LINK).toIntOrNull()?.let { if (!expanded.remove(it)) expanded += it; renderTranscript(force = false) }
                 return@addHyperlinkListener
@@ -809,7 +947,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             override fun mouseReleased(e: java.awt.event.MouseEvent) = popup(e)
             private fun popup(e: java.awt.event.MouseEvent) {
                 if (!e.isPopupTrigger) return
-                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) || it.startsWith(PROMPT_LINK) || it.startsWith(RUN_LINK) } ?: return
+                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) || it.startsWith(TOOL_LINK) || it == MORE_LINK || it.startsWith(PROMPT_LINK) || it.startsWith(RUN_LINK) } ?: return
                 com.intellij.openapi.actionSystem.ActionManager.getInstance()
                     .createActionPopupMenu("HandoffSession", SessionLinks.menu(project, href, baseDir())).component.show(this@apply, e.x, e.y)
                 e.consume()
@@ -873,8 +1011,39 @@ private class SessionEditor(private val project: Project, private val file: Sess
             if (!scroll.isShowing) return@addChangeListener
             val bar = scroll.verticalScrollBar
             val w = scroll.viewport.width
-            if (w != lastWidth) { lastWidth = w; if (stickToEnd) scrollToEnd() }
-            else stickToEnd = bar.value + bar.visibleAmount >= bar.maximum - JBUI.scale(40)
+            if (w != lastWidth) { lastWidth = w; if (stickToEnd) scrollToEnd() else restoreAnchor() }
+            else if (!restoring) {
+                stickToEnd = bar.value + bar.visibleAmount >= bar.maximum - JBUI.scale(40)
+                anchor = anchorAt(bar.value)
+            }
+        }
+    }
+
+    /**
+     * Stelle im Text, die oben in der Ansicht steht (Zeichenposition, Abstand darunter). Nach dem Umbrechen bei neuer Breite
+     * scrollt die Ansicht dorthin zurück - der Pixelwert allein zeigte danach eine viel frühere Stelle, die Ansicht sprang
+     * beim Öffnen des Handoff-Fensters weit nach oben (2026-11-18).
+     */
+    private var anchor: Pair<Int, Int>? = null
+    private var restoring = false
+
+    private fun anchorAt(y: Int): Pair<Int, Int>? = runCatching {
+        val py = y - pane.y
+        if (py < 0) return null
+        val pos = pane.viewToModel2D(java.awt.Point(JBUI.scale(4), py))
+        val top = pane.modelToView2D(pos)?.bounds?.y ?: return null
+        pos to (py - top)
+    }.getOrNull()
+
+    private fun restoreAnchor() {
+        val (pos, offset) = anchor ?: return
+        restoring = true
+        // Erst nach dem neuen Layout steht die Position der Stelle fest.
+        SwingUtilities.invokeLater {
+            try {
+                val r = runCatching { pane.modelToView2D(pos.coerceAtMost(pane.document.length))?.bounds }.getOrNull()
+                if (r != null) scroll.verticalScrollBar.value = pane.y + r.y + offset
+            } finally { SwingUtilities.invokeLater { restoring = false } }
         }
     }
 
@@ -912,6 +1081,25 @@ private class SessionEditor(private val project: Project, private val file: Sess
         add(JPanel(java.awt.GridBagLayout()).apply { isOpaque = false; add(headerLinks) }, BorderLayout.EAST)
     }
     private var limitsReadAt = 0L
+    private var limitTips: List<String> = emptyList()
+
+    /**
+     * Ein Tooltip mit allem, was die Kopfzeile zeigt (Status, Ordner, Modell, Kontext, Limits) plus die Reset-Zeiten - an jedem
+     * Teil gleich, denn bei schmalem Reiter sind die Texte mit "…" gekürzt (2026-11-18).
+     */
+    private fun updateHeaderTip() {
+        val lines = mutableListOf<String>()
+        status.text?.takeIf { it.isNotBlank() }?.let { lines += it }
+        (file.cwd ?: baseDir())?.let { lines += it }
+        lines += limitTips
+        val tip = lines.joinToString("<br>") { StringUtil.escapeXmlEntities(it) }.takeIf { it.isNotEmpty() }?.let { "<html>$it</html>" }
+        if (status.toolTipText != tip) status.toolTipText = tip
+        if (limits.toolTipText != tip) limits.toolTipText = tip
+        val dirTip = tip?.replace("</html>", "<br><br>Click to reveal the folder</html>")
+        if (dirLink.toolTipText != dirTip) dirLink.toolTipText = dirTip
+    }
+
+    private val statusBySession get() = SessionEditors.statusBySession
 
     private fun updateLimits(id: String?) {
         val now = System.currentTimeMillis()
@@ -921,18 +1109,41 @@ private class SessionEditor(private val project: Project, private val file: Sess
         if (!PlanLimits.isInstalled() || !file.isFile) { limits.text = ""; return }
         val l = PlanLimits.read()
         val o = runCatching { JsonParser.parseString(file.readText()).asJsonObject }.getOrNull()
-        val mine = o?.get("session_id")?.takeIf { it.isJsonPrimitive }?.asString == id
+        // statusline.json hält nur die Session, die zuletzt ihre Statuszeile aktualisiert hat - darum je Session merken,
+        // sonst fehlten Modell, Effort und Kontext im Tooltip, sobald eine andere Session gearbeitet hat.
+        o?.get("session_id")?.takeIf { it.isJsonPrimitive }?.asString?.let { statusBySession[it] = o }
+        val mine = id?.let { statusBySession[it] }
         val parts = mutableListOf<String>()
-        if (mine) {
-            o?.getAsJsonObject("model")?.get("display_name")?.takeIf { it.isJsonPrimitive }?.asString?.let { parts += it }
-            o?.getAsJsonObject("context_window")?.get("used_percentage")?.takeIf { it.isJsonPrimitive }?.asInt?.let { parts += "Context $it %" }
+        val tips = mutableListOf<String>()
+        if (mine != null) {
+            fun str(vararg path: String): String? {
+                var e: com.google.gson.JsonElement? = mine
+                for (k in path) e = e?.takeIf { it.isJsonObject }?.asJsonObject?.get(k)
+                return e?.takeIf { it.isJsonPrimitive }?.asString
+            }
+            val model = str("model", "display_name")
+            val effort = str("effort", "level")
+            model?.let { parts += it }
+            listOfNotNull(model?.let { "Model: $it" }, effort?.let { "effort $it" }).takeIf { it.isNotEmpty() }?.let { tips += it.joinToString(", ") }
+            str("context_window", "used_percentage")?.toIntOrNull()?.let { pct ->
+                parts += "Context $pct %"
+                val used = str("context_window", "total_input_tokens")?.toLongOrNull()
+                val size = str("context_window", "context_window_size")?.toLongOrNull()
+                fun k(n: Long) = if (n >= 1_000_000 && n % 1_000_000 == 0L) "${n / 1_000_000}M" else "${(n + 500) / 1000}k"
+                tips += "Context: $pct % used" + (if (used != null && size != null) " (${k(used)} of ${k(size)} tokens)" else "")
+            }
         }
         val fmt = java.time.format.DateTimeFormatter.ofPattern("EEE HH:mm").withZone(java.time.ZoneId.systemDefault())
-        val tips = mutableListOf<String>()
-        l?.fiveHour?.let { w -> parts += "5h ${w.usedPercent.toInt()} %"; w.resetsAt?.let { tips += "5-hour limit resets ${fmt.format(it)}" } }
-        l?.sevenDay?.let { w -> parts += "Week ${w.usedPercent.toInt()} %"; w.resetsAt?.let { tips += "Weekly limit resets ${fmt.format(it)}" } }
+        // Tooltip: je Limit eine Zeile mit Verbrauch und Rücksetzzeit statt zwei getrennter Zeilen.
+        fun limit(label: String, short: String, w: PlanLimits.Window) {
+            parts += "$short ${w.usedPercent.toInt()} %"
+            tips += "$label: ${w.usedPercent.toInt()} % used" + (w.resetsAt?.let { ", resets ${fmt.format(it)}" } ?: "")
+        }
+        l?.fiveHour?.let { limit("5-hour limit", "5h", it) }
+        l?.sevenDay?.let { limit("Weekly limit", "Week", it) }
         limits.text = parts.joinToString("  ·  ")
-        limits.toolTipText = tips.joinToString("<br>").takeIf { it.isNotEmpty() }?.let { "<html>$it</html>" }
+        limitTips = tips
+        updateHeaderTip()
         // Fast aufgebraucht: auffällig.
         val max = listOfNotNull(l?.fiveHour?.usedPercent, l?.sevenDay?.usedPercent).maxOrNull() ?: 0.0
         limits.foreground = if (max >= 90) JBColor(0xB04079, 0xC86A9A) else UIUtil.getContextHelpForeground()
@@ -998,7 +1209,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
             }
         })
         actionMap.put("handoff.send", object : AbstractAction() {
-            override fun actionPerformed(e: java.awt.event.ActionEvent) { if (!slash.acceptIfVisible()) send() }
+            override fun actionPerformed(e: java.awt.event.ActionEvent) {
+                if (slash.acceptIfVisible()) return
+                send()
+            }
         })
         transferHandler = ImageDropHandler(transferHandler) { path -> attach(path) }
         addMouseListener(object : java.awt.event.MouseAdapter() {
@@ -1028,10 +1242,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
      */
     private val attachments = LinkedHashMap<String, String>()
 
-    private fun attach(path: String): String {
+    /** [kind] = eigene Bezeichnung der Marke, z. B. "Drawing" für die Kopie mit Zeichnung (statt des langen Cache-Pfads). */
+    private fun attach(path: String, kind: String? = null): String {
         attachments.entries.firstOrNull { it.value == path }?.let { return it.key }
         val n = attachments.size + 1
-        val token = if (IMAGE.matches(path) || IMAGE.matches("\"$path\"")) "[Image #$n]" else "[File #$n: ${File(path).name}]"
+        val token = when {
+            kind != null -> "[$kind #$n]"
+            IMAGE.matches(path) || IMAGE.matches("\"$path\"") -> "[Image #$n]"
+            else -> "[File #$n: ${File(path).name}]"
+        }
         attachments[token] = path
         return token
     }
@@ -1128,7 +1347,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
 
     private fun imagesInPrompt(): List<String> = IMAGE.findAll(expanded()).map { it.groupValues[1].ifEmpty { it.groupValues[2] } }
-        .filter { File(it).isFile }.distinct().toList()
+        .filter { File(it).isFile && File(it).parentFile?.name != "handoff-drawings" }.distinct().toList()
 
     private fun updateMarkLink() {
         val n = imagesInPrompt().size
@@ -1139,7 +1358,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val MARK_LINE = Regex("""^- (.+), area x=(\d+) y=(\d+) w=(\d+) h=(\d+) px(?:: (.*))?$""")
     private val MARK_HEAD = "Marked areas (pixels of the original image):"
     private val DRAW_HEAD = "Drawings (copies of the images with my drawing on top - read them):"
-    private val DRAW_LINE = Regex("""^- (.+), drawing: (.+\.png)$""")
+    private val DRAW_LINE = Regex("""^- (.+), drawing: (.+\.png|\[Drawing #\d+])$""")
     /** Zeichnungen je Bildpfad - lassen sich aus dem Prompt-Text nicht zurücklesen. */
     private val promptShapes = HashMap<String, List<Shape>>()
 
@@ -1158,14 +1377,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         val dialog = MarkupDialog(project, paths, 0, initial, true, paths.indices.associateWith { promptShapes[paths[it]].orEmpty() })
         if (!dialog.showAndGet()) return
-        val drawnBefore = lines.mapNotNull { DRAW_LINE.matchEntire(it.trim()) }.associate { it.groupValues[1] to it.groupValues[2] }
+        val drawnBefore = lines.mapNotNull { DRAW_LINE.matchEntire(it.trim()) }
+            .associate { it.groupValues[1] to (attachments[it.groupValues[2]] ?: it.groupValues[2]) }
         val drawings = dialog.allShapes.toSortedMap().mapNotNull { (i, list) ->
             val path = paths[i]; val name = File(path).name
             if (list.isEmpty()) { promptShapes.remove(path); return@mapNotNull null }
             // Unverändert: die vorhandene Kopie behalten.
             val file = drawnBefore[name]?.takeIf { promptShapes[path] == list } ?: Drawing.save(path, list) ?: return@mapNotNull null
             promptShapes[path] = list.map { it.copy() }
-            "- $name, drawing: $file"
+            "- $name, drawing: ${attach(file, "Drawing")}"
         }
         val marks = dialog.allMarks.toSortedMap().flatMap { (i, list) ->
             list.map { m -> "- ${File(paths[i]).name}, area x=${m.x} y=${m.y} w=${m.w} h=${m.h} px" + (if (m.note.isNotBlank()) ": ${m.note.trim()}" else "") }
@@ -1234,6 +1454,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             // Wie beim Senden gleich als Prompt mit "Queued" zeigen - ohne Rückmeldung wirkte ▶ (etwa bei /compact, das
             // eine Weile braucht) wie kaputt und wurde mehrfach geklickt (2026-11-17).
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
+            if (!file.busy) startedIdle += cmd
             pending += cmd; renderTranscript(force = true)
             input.requestFocusInWindow()
         }
@@ -1246,14 +1467,81 @@ private class SessionEditor(private val project: Project, private val file: Sess
         input.requestFocusInWindow()
     }
 
+    /** Suche im Verlauf (Ctrl/Cmd+F): Treffer markiert, Enter/Shift+Enter springt, Esc schließt. */
+    private val searchField = com.intellij.ui.SearchTextField(false)
+    private val searchCount = JBLabel().apply { foreground = UIUtil.getContextHelpForeground() }
+    private var matches: List<Int> = emptyList()
+    private var current = 0
+    private val search: JPanel = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
+        border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(4, 12))
+        isVisible = false
+        add(searchField, BorderLayout.CENTER)
+        add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0)).apply {
+            isOpaque = false
+            add(searchCount)
+            add(ActionLink("Close") { closeSearch() })
+        }, BorderLayout.EAST)
+        searchField.addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
+            override fun textChanged(e: javax.swing.event.DocumentEvent) { current = 0; highlight(scrollTo = true) }
+        })
+        searchField.textEditor.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                when (e.keyCode) {
+                    java.awt.event.KeyEvent.VK_ENTER -> { step(if (e.isShiftDown) -1 else 1); e.consume() }
+                    java.awt.event.KeyEvent.VK_ESCAPE -> { closeSearch(); e.consume() }
+                }
+            }
+        })
+    }
+
+    private fun openSearch() {
+        search.isVisible = true
+        pane.selectedText?.takeIf { it.isNotBlank() && '\n' !in it }?.let { searchField.text = it }
+        searchField.requestFocusInWindow(); searchField.selectText()
+        search.revalidate()
+    }
+
+    private fun closeSearch() {
+        search.isVisible = false
+        pane.highlighter.removeAllHighlights()
+        matches = emptyList()
+        search.revalidate()
+    }
+
+    private fun step(d: Int) {
+        if (matches.isEmpty()) return
+        current = (current + d + matches.size) % matches.size
+        highlight(scrollTo = true)
+    }
+
+    private fun highlight(scrollTo: Boolean) {
+        val h = pane.highlighter
+        h.removeAllHighlights()
+        val q = searchField.text.trim()
+        val doc = pane.document
+        val text = runCatching { doc.getText(0, doc.length) }.getOrDefault("")
+        matches = if (q.isEmpty()) emptyList() else buildList {
+            var i = text.indexOf(q, ignoreCase = true)
+            while (i >= 0) { add(i); i = text.indexOf(q, i + q.length, ignoreCase = true) }
+        }
+        if (current >= matches.size) current = 0
+        searchCount.text = if (q.isEmpty()) "" else if (matches.isEmpty()) "No matches" else "${current + 1}/${matches.size}"
+        val all = javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(JBColor.namedColor("SearchMatch.endBackground", JBColor(0xFFE57F, 0x5C4A1E)))
+        val cur = javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(JBColor.namedColor("SearchMatch.startBackground", JBColor(0xFFB830, 0x8A6A12)))
+        matches.forEachIndexed { k, i -> runCatching { h.addHighlight(i, i + q.length, if (k == current) cur else all) } }
+        if (scrollTo && matches.isNotEmpty()) runCatching {
+            pane.modelToView2D(matches[current])?.bounds?.let { r -> r.grow(0, JBUI.scale(60)); pane.scrollRectToVisible(r) }
+        }
+    }
+
     /** Session läuft nicht im Terminal der IDE (z. B. nach einem Neustart): Knopf "Resume" statt "Send". */
     private var resumable = false
     private val hint = JBLabel().apply { foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont() }
 
     private val root = JPanel(BorderLayout()).apply {
         add(header, BorderLayout.NORTH)
-        add(scroll, BorderLayout.CENTER)
-        add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+        add(JPanel(BorderLayout()).apply { add(search, BorderLayout.NORTH); add(scroll, BorderLayout.CENTER) }, BorderLayout.CENTER)
+        if (file.logOnly) add(logBar(), BorderLayout.SOUTH) else add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             border = JBUI.Borders.compound(JBUI.Borders.customLineTop(JBColor.border()), JBUI.Borders.empty(8, 12))
             add(question, BorderLayout.NORTH)
             add(JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
@@ -1274,10 +1562,27 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }, BorderLayout.SOUTH)
     }
 
+    /** Fuß der reinen Protokoll-Ansicht: Fortsetzen öffnet einen eigenen Session-Reiter, die `.jsonl` bleibt, wie sie ist. */
+    private fun logBar(): JComponent = JPanel(BorderLayout(JBUI.scale(12), 0)).apply {
+        border = JBUI.Borders.compound(JBUI.Borders.customLineTop(JBColor.border()), JBUI.Borders.empty(8, 12))
+        add(JBLabel("Saved session log, read-only. Resume continues it in a new session tab (claude --resume).").apply {
+            foreground = UIUtil.getContextHelpForeground()
+        }, BorderLayout.CENTER)
+        add(javax.swing.JButton("Resume in New Tab").apply {
+            addActionListener {
+                val id = file.currentSession(project) ?: return@addActionListener
+                SessionEditors.resumeOld(project, id, file.cwd ?: project.basePath ?: return@addActionListener)
+            }
+        }, BorderLayout.EAST)
+    }
+
     private val timer = Timer(700) { refresh() }.apply { start() }
 
     init {
         refresh()
+        object : com.intellij.openapi.project.DumbAwareAction() {
+            override fun actionPerformed(e: com.intellij.openapi.actionSystem.AnActionEvent) = openSearch()
+        }.registerCustomShortcutSet(com.intellij.openapi.actionSystem.CommonShortcuts.getFind(), root, this)
         // Theme gewechselt: Farben im CSS (Prompt-Hintergrund, Grau) und den Hintergrund des Verlaufs neu setzen (2026-11-15:
         // nach Dark -> Light blieben die Prompts dunkelblau).
         com.intellij.openapi.application.ApplicationManager.getApplication().messageBus.connect(this)
@@ -1325,7 +1630,21 @@ private class SessionEditor(private val project: Project, private val file: Sess
             com.intellij.openapi.actionSystem.KeyboardShortcut(KeyStroke.getKeyStroke("meta ENTER"), null)), input, this)
     }
 
+    /** Vorgemerkte Prompts, die Claude erst nach dem laufenden Schritt liest (nicht schon per Ctrl+Enter gesendet). */
+    private fun queued(): List<String> =
+        if (file.tab != null && terminalOpen && file.busy) pending.filter { it !in sentNow && it !in startedIdle } else emptyList()
+
     private fun send(now: Boolean = false) {
+        // Leeres Feld + Ctrl+Enter: die vorgemerkten Prompts sofort schicken. Claude Code macht bei leerer Eingabe aus
+        // `chat:sendNow` ein "sendQueuedNow" (im Bundle von 2.1.327 nachgelesen, 2026-11-18).
+        if (now && input.text.isBlank()) {
+            val waiting = queued()
+            val tab = file.tab
+            if (waiting.isNotEmpty() && tab != null && SessionTerminals.keys(project, tab, "\u0018\u0013")) {
+                sentNow += waiting; renderTranscript(force = true)
+            }
+            return
+        }
         val shown = input.text.trim().takeIf { it.isNotEmpty() } ?: return
         if (resumeFromTab(shown)) return
         val text = expanded(shown)
@@ -1340,7 +1659,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val tab = file.tab
         // Steht im Terminal schon Text (z. B. ein "@datei" von „Send to Claude Code“), ginge er mit diesem Prompt ab: erst warnen,
         // ein zweites Senden mit demselben Text im Terminal schickt trotzdem.
-        val typed = if (tab != null && terminalOpen) SessionTerminals.typedInput(project, tab) else null
+        // Hinweise wie "[⧉ In datei.md]" (offene Editor-Datei bzw. Auswahl, zeigt Claude Code in der Eingabezeile) sind kein
+        // getippter Text und gehen nicht mit - sonst warnte das erste Enter nach jedem Wechsel der Editor-Datei (2026-11-18).
+        val typed = (if (tab != null && terminalOpen) SessionTerminals.typedInput(project, tab) else null)
+            ?.replace(Regex("""^(?:\[[^\]\n]+]\s*)+"""), "")?.trim()?.takeIf { it.isNotEmpty() }
         if (typed != null && typed != warnedTyped) {
             warnedTyped = typed
             hint.text = "The terminal input already holds \"${typed.take(60)}\" - it would be sent along. Clear it there (Ctrl+U) or send again."
@@ -1353,9 +1675,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         if (ok) {
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
+            if (!file.busy) startedIdle += text
             pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
         }
-        else hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
+        else {
+            hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
+        }
     }
 
     /**
@@ -1423,14 +1748,72 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private fun updateTabTitle() = runCatching {
         com.intellij.openapi.fileEditor.ex.FileEditorManagerEx.getInstanceEx(project).updateFilePresentation(file)
+        // Auch die Navigationsleiste (Breadcrumb unten) zeichnet Symbol und Name neu - sie hört auf dieses Thema, nicht auf
+        // updateFilePresentation; sonst drehte sich dort der Spinner weiter, obwohl Claude fertig war (2026-11-18).
+        com.intellij.ide.ui.VirtualFileAppearanceListener.fireVirtualFileAppearanceChanged(file)
     }
 
-    private fun appendEntry(html: StringBuilder, e: TranscriptEntry) {
+    /**
+     * Werkzeugzeile; schlug der Aufruf fehl, rot mit ✗ und der ersten Zeile der Meldung. Klick klappt den ganzen Aufruf und
+     * das Ergebnis auf.
+     */
+    private fun toolHtml(html: StringBuilder, e: TranscriptEntry, key: Int) {
+        val err = e.error
+        val open = key in openTools
+        val canOpen = e.detail != null || e.output != null
+        val label = StringUtil.escapeXmlEntities(e.text)
+        val text = if (canOpen) "<a href=\"$TOOL_LINK$key\">$label</a>" else label
+        html.append("<div class=\"tool\">")
+        if (err == null) html.append(if (open) "▾ " else "⚙ ").append(text)
+        else html.append("<span class=\"error\">✗ </span>").append(text).append("<span class=\"error\"> — ").append(StringUtil.escapeXmlEntities(err)).append("</span>")
+        html.append("</div>")
+        if (!open) return
+        e.detail?.let { html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(it)).append("</pre>") }
+        html.append("<pre class=\"note\">").append(StringUtil.escapeXmlEntities(e.output?.ifBlank { "(no output)" } ?: "(no result yet)")).append("</pre>")
+    }
+
+    /** Uhrzeit am Prompt, bei älteren Tagen mit Datum; im Screenshot-Modus nicht (verrät Arbeitszeiten). */
+    private fun timeHtml(t: Long?): String {
+        if (t == null || System.getProperty("handoff.screenshots") != null) return ""
+        val today = java.time.LocalDate.now()
+        val at = java.time.Instant.ofEpochMilli(t).atZone(java.time.ZoneId.systemDefault())
+        val text = if (at.toLocalDate() == today) time.format(Date(t)) else SimpleDateFormat("d.M. HH:mm").format(Date(t))
+        return text
+    }
+
+    private fun appendEntry(html: StringBuilder, e: TranscriptEntry, key: Int) {
         when (e.kind) {
-            TranscriptEntry.Kind.USER -> html.append("<div class=\"user\">")
-                .append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
+            // Uhrzeit oben rechts in der Sprechblase: Swing-HTML kennt kein float/position, darum eine Tabelle.
+            TranscriptEntry.Kind.USER -> {
+                val prompt = StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")
+                val t = timeHtml(e.time)
+                html.append("<div class=\"user\">")
+                if (t.isEmpty()) html.append(prompt)
+                else html.append("<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"prompt\" valign=\"top\">").append(prompt)
+                    .append("</td><td class=\"time\" align=\"right\" valign=\"top\" nowrap>").append(t).append("</td></tr></table>")
+                html.append("</div>")
+            }
             TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(promptLinks(Md.document(e.text)), baseDir()))
-            TranscriptEntry.Kind.TOOL -> html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(e.text)).append("</div>")
+            TranscriptEntry.Kind.TOOL -> toolHtml(html, e, key)
+            TranscriptEntry.Kind.IMAGE -> {
+                val src = File(e.path ?: return).toURI().toString()
+                html.append("<div class=\"tool\"><a href=\"").append(StringUtil.escapeXmlEntities(e.path)).append("\"><img src=\"")
+                    .append(src).append("\" width=\"${JBUI.scale(e.width)}\" height=\"${JBUI.scale(e.height)}\" border=\"0\"></a></div>")
+            }
+            TranscriptEntry.Kind.INFO -> html.append("<div class=\"tool\">").append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
+            TranscriptEntry.Kind.DIVIDER -> html.append("<div class=\"divider\">— ").append(StringUtil.escapeXmlEntities(e.text)).append(" —</div>")
+            TranscriptEntry.Kind.FILE -> {
+                val p = e.path.orEmpty()
+                val base = baseDir()?.trimEnd('/')
+                val shown = if (base != null && p.startsWith("$base/")) p.removePrefix("$base/") else File(p).name
+                val href = p + (e.line?.let { ":$it" } ?: "")
+                html.append("<div class=\"tool\">⎘ ").append(StringUtil.escapeXmlEntities(e.text)).append(" ")
+                // Datei gibt es nicht mehr (umbenannt, gelöscht): kein Link, der ins Leere führt.
+                if (File(p).exists()) html.append("<a href=\"").append(StringUtil.escapeXmlEntities(href)).append("\">")
+                    .append(StringUtil.escapeXmlEntities(shown)).append("</a>")
+                else html.append(StringUtil.escapeXmlEntities(shown)).append(" <i>(no longer there)</i>")
+                html.append("</div>")
+            }
             // Kurze Rückmeldungen lokaler Befehle ("Compacted", "Interrupted") als graue Statuszeile wie Tool-Zeilen -
             // als umrandeter Kasten wirkten sie wie ein Eingabefeld; mehrzeilige Ausgaben (/cost, /context) bleiben Kasten.
             TranscriptEntry.Kind.NOTE -> if ('\n' !in e.text && e.text.length <= 120)
@@ -1482,9 +1865,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val t = transcript ?: return
         val bar = scroll.verticalScrollBar
         val atEnd = force || bar.value + bar.visibleAmount >= bar.maximum - JBUI.scale(40)
-        val shown = t.entries.takeLast(MAX_ENTRIES)
+        val shown = t.entries.takeLast(limit)
         val html = StringBuilder("<html><body>")
-        if (t.entries.size > shown.size) html.append("<p class=\"note\">${t.entries.size - shown.size} earlier entries not shown.</p>")
+        if (t.entries.size > shown.size) (t.entries.size - shown.size).let { n ->
+            html.append("<p class=\"note\">$n earlier entries not shown · <a href=\"$MORE_LINK\">Show ${minOf(n, MAX_ENTRIES)} more</a></p>")
+        }
         if (shown.isEmpty()) html.append("<p class=\"note\">No messages yet.</p>")
         // Aufeinanderfolgende Werkzeug-Schritte eingeklappt: eine Zeile mit Anzahl und letztem Schritt, Klick klappt auf.
         val offset = t.entries.size - shown.size
@@ -1499,9 +1884,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
                     val key = offset + i
                     val open = key in expanded
                     html.append("<div class=\"tool\"><a href=\"$STEPS_LINK$key\">${if (open) "▾" else "▸"} $count steps</a>")
+                    val failed = (i..end).count { shown[it].error != null }
+                    if (failed > 0) html.append(" · <span class=\"error\">$failed failed</span>")
                     if (!open) html.append(" · ").append(StringUtil.escapeXmlEntities(StringUtil.shortenTextWithEllipsis(shown[end].text, 120, 0)))
                     html.append("</div>")
-                    if (open) for (k in i..end) html.append("<div class=\"tool\">⚙ ").append(StringUtil.escapeXmlEntities(shown[k].text)).append("</div>")
+                    if (open) for (k in i..end) toolHtml(html, shown[k], offset + k)
                     i = end + 1
                     continue
                 }
@@ -1510,12 +1897,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 val key = offset + i
                 val open = key in expanded
                 html.append("<div class=\"tool\"><a href=\"$STEPS_LINK$key\">${if (open) "▾" else "▸"} Summary of the earlier conversation</a></div>")
-                if (open) html.append("<div class=\"user\">").append(StringUtil.escapeXmlEntities(e.text).replace("\n", "<br>")).append("</div>")
+                // Grau und als Markdown, nicht im Prompt-Stil - die Zusammenfassung schreibt Claude Code, nicht der Nutzer.
+                if (open) html.append("<div class=\"summary\">").append(Md.document(e.text)).append("</div>")
                 i++
                 continue
             }
             i++
-            appendEntry(html, e)
+            appendEntry(html, e, offset + i - 1)
         }
         // Abgeschickt, aber noch nicht im Protokoll (Claude arbeitet noch und hat ihn nur vorgemerkt): grau zeigen.
         // Claude Code speichert Prompts teils verändert (Bildpfade als [Image #1], eingefügter Text gekürzt) - der Text passt
@@ -1531,8 +1919,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         // Swing-HTML kennt nur eine Klasse je Element - grau per innerem span.
         sentNow.retainAll(pending.toSet())
+        startedIdle.retainAll(pending.toSet())
+        applyEmptyText()
         for (p in pending) html.append("<div class=\"user\"><span class=\"pending\">").append(StringUtil.escapeXmlEntities(p).replace("\n", "<br>"))
-            .append(if (p in sentNow) "<br><i>Sent now - Claude stops its current step and reads it right away.</i></span></div>"
+            .append(if (p in startedIdle) (if (p.startsWith("/")) "<br><i>Running…</i></span></div>" else "<br><i>Sent - Claude is on it.</i></span></div>")
+                else if (p in sentNow) "<br><i>Sent now - Claude stops its current step and reads it right away.</i></span></div>"
                 else "<br><i>Queued - Claude reads it after its current step (Ctrl+Enter sends right away).</i></span></div>")
         // Eine Zeile für alle Hintergrund-Aufgaben: Anzahl und die zuletzt gestartete.
         backgroundTasks().takeIf { it.isNotEmpty() }?.let { tasks ->
@@ -1542,6 +1933,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         html.append("</body></html>")
         val value = bar.value
         pane.text = html.toString()
+        if (search.isVisible) highlight(scrollTo = false)
         if (atEnd) scrollToEnd() else SwingUtilities.invokeLater { bar.value = value }
     }
 
@@ -1576,6 +1968,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             else -> "Ready" to UIUtil.getContextHelpForeground()
         }
         status.text = if (tasks > 0 && working == null && !wasSent) "$text · $tasks background task${if (tasks > 1) "s" else ""} running" else text
+        updateHeaderTip()
         status.foreground = color
         val isBusy = working != null || wasSent
         if (file.busy != isBusy) { file.busy = isBusy; updateTabTitle() }
@@ -1589,7 +1982,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Session läuft nicht mehr (Terminal zu, IDE neu gestartet): im neuen Terminal fortsetzen.
         // Läuft sie doch noch anderswo (z. B. iTerm), entstünde ein zweiter Strang - deshalb nur, wenn nicht gerade gearbeitet wird.
         resumable = !terminal && id != null && working == null && !wasSent && SessionTerminals.available
-        if (resumable) headerLinks.add(ActionLink("Resume in Terminal") { SessionEditors.resume(project, file, id!!) })
+        if (resumable && !file.logOnly) headerLinks.add(ActionLink("Resume in Terminal") { SessionEditors.resume(project, file, id!!) })
         headerLinks.revalidate(); headerLinks.repaint()
 
         question.removeAll()
@@ -1636,6 +2029,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Auch, wenn die Session erst fortgesetzt werden muss: Der Prompt geht dann beim Fortsetzen mit (2026-11-15: Feld war
         // nach einem IDE-Neustart gesperrt, man konnte nur Bilder hineinziehen).
         input.isEnabled = canSend || resumable
+        // DefaultCaret macht die Schreibmarke nur beim Fokuserhalt sichtbar, und nur wenn das Feld da aktiv ist. Bekam es den
+        // Fokus, während es gesperrt war (Claude noch nicht bereit), blieb sie nach dem Freigeben unsichtbar (2026-11-18).
+        if (input.isEnabled && input.isFocusOwner && !input.caret.isVisible) input.caret.isVisible = true
         send.isEnabled = canSend || resumable
         // Slash-Befehle erreichen nur Sessions im eigenen Terminal.
         commands.isEnabled = terminal
@@ -1659,13 +2055,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
     /** Text im Terminal-Eingabefeld, vor dem [send] schon gewarnt hat. */
     private var warnedTyped: String? = null
 
-    /** Vorschlag von Claude Code für den nächsten Prompt (grau im leeren Feld, Tab übernimmt ihn). */
-    private var suggestion: String? = null
-    private var baseEmptyText = ""
 
     private fun applyEmptyText() {
         // Mit Vorschlag zeichnet das Feld selbst (auch mit Fokus); der Platzhalter der IDE bleibt dann leer.
-        val text = if (suggestion != null) "" else baseEmptyText
+        val waiting = queued().size
+        val text = when {
+            suggestion != null -> ""
+            waiting > 0 -> "Ctrl+Enter sends the queued " + (if (waiting == 1) "prompt" else "$waiting prompts") + " right away"
+            else -> baseEmptyText
+        }
         if (input.emptyText.text != text) { input.emptyText.text = text; input.repaint() }
     }
 
@@ -1707,6 +2105,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         /** Mehr Einträge machen den HTML-Viewer träge; der ganze Verlauf steht im Terminal. */
         private const val MAX_ENTRIES = 300
         private const val STEPS_LINK = "handoff-steps:"
+        private const val TOOL_LINK = "handoff-tool:"
+        private const val MORE_LINK = "handoff-more"
         private const val PROMPT_LINK = "handoff-prompt:"
         private const val RUN_LINK = "handoff-run:"
         private val PRE = Regex("(<pre[^>]*>)(.*?)</pre>", RegexOption.DOT_MATCHES_ALL)
@@ -1778,4 +2178,35 @@ object IdeTargets {
         if (!t.contains(' ') && !t.endsWith("…") && !t.endsWith("...")) return null
         return actions?.get(n)?.let { "action:$it" }
     }
+}
+
+/** Session-Ansicht für ein Protokoll außerhalb eines Session-Reiters (siehe [SessionLogEditorProvider]). */
+internal fun createSessionEditor(project: Project, file: SessionFile): FileEditor = SessionEditor(project, file)
+
+/**
+ * Prompts als Sprechblase: Swing-HTML kennt kein `border-radius`, darum malt diese View den Hintergrund von
+ * `<div class="user">` selbst mit runden Ecken (Farbe wie zuvor im CSS).
+ */
+private object BUBBLE : com.intellij.util.ui.ExtendableHTMLViewFactory.Extension {
+    override fun invoke(elem: javax.swing.text.Element, view: javax.swing.text.View): javax.swing.text.View? =
+    if (view is javax.swing.text.html.BlockView && elem.attributes.getAttribute(javax.swing.text.html.HTML.Attribute.CLASS) == "user")
+        object : javax.swing.text.html.BlockView(elem, javax.swing.text.View.Y_AXIS) {
+            override fun paint(g: java.awt.Graphics, a: java.awt.Shape) {
+                val r = a.bounds
+                val g2 = g.create() as java.awt.Graphics2D
+                try {
+                    g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+                    g2.color = JBColor.namedColor("EditorTabs.underlinedTabBackground", JBColor(0xEEF2F8, 0x2E3440))
+                    val arc = JBUI.scale(16).toFloat()
+                    // Ränder (margin-top/-bottom) gehören nicht zur Blase.
+                    val top = getTopInset() - getInsetFromCss(javax.swing.text.html.CSS.Attribute.PADDING_TOP)
+                    val bottom = getBottomInset() - getInsetFromCss(javax.swing.text.html.CSS.Attribute.PADDING_BOTTOM)
+                    g2.fill(java.awt.geom.RoundRectangle2D.Float(r.x.toFloat(), r.y + top, r.width.toFloat(), r.height - top - bottom, arc, arc))
+                } finally { g2.dispose() }
+                super.paint(g, a)
+            }
+            private fun getInsetFromCss(k: javax.swing.text.html.CSS.Attribute): Float =
+                (attributes.getAttribute(k)?.toString()?.removeSuffix("px")?.toFloatOrNull() ?: 0f)
+        }
+    else view
 }

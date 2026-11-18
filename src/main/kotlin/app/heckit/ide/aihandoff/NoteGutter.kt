@@ -28,24 +28,62 @@ import javax.swing.Icon
 /**
  * "+" im Zeilenrand beim Überfahren einer Zeile: Ein Klick legt eine Notiz für Claude an (wie bei Code-Reviews).
  * Technisch ein gewöhnliches Randsymbol an der Zeile unter der Maus, an der Stelle, wo danach die Sprechblase steht.
- * Im Diff immer; in normalen Editoren nur, solange eine Prüfung wartet oder schon Notizen da sind - sonst stünde
- * das "+" dauerhaft in jeder Datei.
+ * Im Diff immer; in normalen Editoren, solange das Notiz-Werkzeug in Handoff Tools… erlaubt ist.
  */
 object NoteGutter {
     private val KEY = Key.create<Hover>("handoff.noteGutter")
 
-    private fun file(editor: Editor): VirtualFile? =
-        FileDocumentManager.getInstance().getFile(editor.document)?.takeIf { it.isInLocalFileSystem }
+    /**
+     * Echtes Dokument hinter dem Editor. Der einseitige Diff (Unified, Standard bei geänderten Dateien) zeigt ein eigenes,
+     * zusammengesetztes Dokument; das der aktuellen Fassung hängt als ORIGINAL_DOCUMENT daran (UnifiedDiffViewer) - ohne
+     * das gab es das "+" nur bei neuen Dateien (2026-11-18).
+     */
+    private fun document(editor: Editor): com.intellij.openapi.editor.Document {
+        editor.document.getUserData(com.intellij.openapi.command.undo.UndoManager.ORIGINAL_DOCUMENT)?.let { return it }
+        // Nur gesetzt, wenn die aktuelle Fassung bearbeitbar ist - sonst über die Anfrage des Viewers (rechte Seite).
+        val viewer = unified(editor) ?: return editor.document
+        val request = viewer.request as? com.intellij.diff.requests.ContentDiffRequest ?: return editor.document
+        return (request.contents.getOrNull(1) as? com.intellij.diff.contents.DocumentContent)?.document ?: editor.document
+    }
 
-    private fun reviewing(project: com.intellij.openapi.project.Project): Boolean =
-        project.getServiceIfCreated(HandoffService::class.java)?.proposals?.any { it.review && it.isPending } == true ||
-            project.getServiceIfCreated(NotesService::class.java)?.hasNotes == true
+    private fun unified(editor: Editor): com.intellij.diff.tools.fragmented.UnifiedDiffViewer? =
+        if (editor.editorKind != EditorKind.DIFF) null
+        else (com.intellij.ide.DataManager.getInstance().getDataContext(editor.component)
+            .getData(com.intellij.diff.tools.util.DiffDataKeys.DIFF_VIEWER) as? com.intellij.diff.tools.fragmented.UnifiedDiffViewer)
+            ?.takeIf { it.editor === editor }
+
+    private fun file(editor: Editor): VirtualFile? =
+        FileDocumentManager.getInstance().getFile(document(editor))?.takeIf { it.isInLocalFileSystem }
+
+    /** Zeile im echten Dokument; -1, wenn die Zeile im einseitigen Diff nur in der alten Fassung steht (gelöscht). */
+    fun realLine(editor: Editor, line: Int): Int {
+        if (document(editor) === editor.document) return line
+        val viewer = unified(editor) ?: return -1
+        return viewer.transferLineFromOnesideStrict(com.intellij.diff.util.Side.RIGHT, line)
+    }
+
+    /**
+     * "+" auch in normalen Editoren - immer, solange das Werkzeug für Notizen (handoff_get_notes) in **Handoff Tools…** erlaubt
+     * ist (2026-11-18; vorher nur bei wartendem Review oder vorhandenen Notizen, das wirkte zufällig). Die Einstellung steht in
+     * ~/.claude/settings.json - darum nur alle paar Sekunden gelesen.
+     */
+    private fun reviewing(project: com.intellij.openapi.project.Project): Boolean = notesAllowed()
+
+    @Volatile private var allowedAt = 0L
+    @Volatile private var allowed = true
+    private fun notesAllowed(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - allowedAt > 5000) { allowedAt = now; allowed = runCatching { "handoff_get_notes" !in Permissions.denied() }.getOrDefault(true) }
+        return allowed
+    }
 
     fun install(editor: Editor) {
         val project = editor.project ?: return
         if (project.isDisposed || editor !is EditorEx) return
         if (editor.editorKind != EditorKind.DIFF && editor.editorKind != EditorKind.MAIN_EDITOR) return
-        if (editor.getUserData(KEY) != null || file(editor) == null) return
+        // Im Diff die Datei erst beim Überfahren prüfen: Beim Anlegen des Editors hängt das Dokument der aktuellen Fassung
+        // im einseitigen Diff noch nicht am zusammengesetzten Dokument - geänderte Dateien bekamen so nie ein "+" (2026-11-18).
+        if (editor.getUserData(KEY) != null || (editor.editorKind != EditorKind.DIFF && file(editor) == null)) return
         val hover = Hover(editor)
         editor.addEditorMouseMotionListener(hover, hover)
         editor.addEditorMouseListener(hover, hover)
@@ -67,6 +105,9 @@ object NoteGutter {
         private var line = -1
         private var highlighter: RangeHighlighter? = null
 
+        /** "+" weg (nach dem Klick) - sonst stünde es nach dem Speichern neben der Sprechblase, bis die Maus die Zeile verlässt. */
+        fun hide() = show(-1)
+
         private fun show(newLine: Int) {
             if (newLine == line) return
             line = newLine
@@ -77,7 +118,9 @@ object NoteGutter {
             val document = editor.document
             if (editor.editorKind != EditorKind.DIFF && !reviewing(project)) return
             // Kein "+" an Zeilen mit Notiz - dort steht die Sprechblase.
-            if (newLine < 0 || newLine >= document.lineCount || NotesService.getInstance(project).at(file, newLine) != null) return
+            if (newLine < 0 || newLine >= document.lineCount) return
+            val real = realLine(editor, newLine)
+            if (real < 0 || NotesService.getInstance(project).at(file, real) != null) return
             highlighter = editor.markupModel.addRangeHighlighter(
                 null, document.getLineStartOffset(newLine), document.getLineStartOffset(newLine), HighlighterLayer.LAST, HighlighterTargetArea.LINES_IN_RANGE,
             ).apply { gutterIconRenderer = Plus(editor, newLine) }
@@ -108,7 +151,10 @@ object NoteGutter {
         override fun getClickAction(): AnAction = object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) {
                 val project = editor.project ?: return
-                NotePopup.show(project, editor, line, null)
+                val real = realLine(editor, line).takeIf { it >= 0 } ?: return
+                val doc = document(editor)
+                editor.getUserData(KEY)?.hide()
+                NotePopup.show(project, editor, line, null, target = if (doc === editor.document) null else doc to real)
             }
         }
         override fun equals(other: Any?) = other is Plus && other.editor === editor && other.line == line

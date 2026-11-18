@@ -73,6 +73,7 @@
         <errorHandler implementation="com.intellij.diagnostic.JetBrainsMarketplaceErrorReportSubmitter"/>
         <fileEditorProvider implementation="app.heckit.ide.aihandoff.MarkdownViewerProvider"/>
         <fileEditorProvider implementation="app.heckit.ide.aihandoff.SessionEditorProvider"/>
+        <fileEditorProvider implementation="app.heckit.ide.aihandoff.SessionLogEditorProvider"/>
         <editorTabTitleProvider implementation="app.heckit.ide.aihandoff.SessionTabTitleProvider"/>
         <fileIconProvider implementation="app.heckit.ide.aihandoff.SessionIconProvider" order="first"/>
         <editorFactoryListener implementation="app.heckit.ide.aihandoff.NoteGutterInstaller"/>
@@ -98,6 +99,14 @@
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
             <add-to-group group-id="Diff.EditorPopupMenu" anchor="last"/>
             <add-to-group group-id="EditorGutterPopupMenu" anchor="last"/>
+        </action>
+        <action id="Handoff.OpenSessionLog" class="app.heckit.ide.aihandoff.OpenSessionLogAction" text="Open Session Log (.jsonl)"
+                description="Open the Claude Code transcript file of this session">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+        </action>
+        <action id="Handoff.ExportSessionMarkdown" class="app.heckit.ide.aihandoff.ExportSessionMarkdownAction" text="Export Session as Markdown…"
+                description="Save this Claude Code session (prompts, answers, tool steps) as a Markdown file">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
         </action>
     </actions>
     <applicationListeners>

@@ -279,6 +279,13 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         HandoffService.getInstance(project).fireChanged()
     }
 
+    /** Alle „Claude is done/waiting“-Karten auf einmal (Mülleimer im Handoff-Fenster). */
+    fun dismissAll() {
+        sessions.forEach { it.file.delete() }
+        sessions = emptyList()
+        HandoffService.getInstance(project).fireChanged()
+    }
+
     fun dismiss(w: WorkingSession) {
         File(WaitingHook.waiting, "${w.id}.busy").delete()
         working = working.filter { it !== w }
@@ -322,6 +329,22 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
     fun canReply(id: String): Boolean = canSendKeys(id) || waiting(id)?.listening == true
     fun canSendKeys(id: String): Boolean = infos[id]?.tab?.let { SessionTerminals.isOpen(project, it) } == true
 
+    /**
+     * Session läuft in einem Terminal-Reiter einer anderen IDE (Prozessnummer in der Kennung, Prozess lebt noch) oder eines
+     * anderen Projekts dieser IDE - dann gehört sie nicht hierher, auch wenn ihr Ordner im Projekt liegt (Sandbox-Session
+     * im Unterordner erschien als Karte in der normalen IDE, 2026-11-18).
+     */
+    private fun foreignTab(tab: String?): Boolean {
+        if (tab == null) return false
+        Regex("^p(\\d+)-").find(tab)?.groupValues?.get(1)?.toLongOrNull()?.let { pid ->
+            if (pid != ProcessHandle.current().pid() && ProcessHandle.of(pid).map { it.isAlive }.orElse(false)) return true
+        }
+        if (project.getServiceIfCreated(TerminalBridge::class.java)?.owns(tab) == true) return false
+        return com.intellij.openapi.project.ProjectManager.getInstance().openProjects.any { p ->
+            p !== project && !p.isDisposed && p.getServiceIfCreated(TerminalBridge::class.java)?.owns(tab) == true
+        }
+    }
+
     private fun inProject(cwd: String?): Boolean {
         val c = cwd?.trimEnd('/') ?: return false
         return dirs().any { c == it || c.startsWith("$it/") }
@@ -360,12 +383,15 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         // Reste abgebrochener Sessions (Terminal geschlossen, ohne SessionEnd) nach einem Tag wegräumen.
         files.filter { now - it.lastModified() > 24 * 3600_000L }.forEach { it.delete() }
         val byName = files.filter { it.isFile }.associateBy { it.name }
+        val foreign = byName.values.filter { it.name.endsWith(".tab") }
+            .filter { foreignTab(runCatching { it.readText().trim() }.getOrNull()) }.map { it.name.removeSuffix(".tab") }.toSet()
 
         val newInfos = byName.values.filter { it.name.endsWith(".info") }.mapNotNull { f ->
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/')
             if (!inProject(cwd)) return@mapNotNull null
             val id = f.name.removeSuffix(".info")
+            if (id in foreign) return@mapNotNull null
             SessionInfo(id, f.lastModified(), cwd!!, o.str("transcript_path"), byName["$id.tab"]?.let { runCatching { it.readText().trim() }.getOrNull() })
         }.associateBy { it.id }
 
@@ -374,6 +400,7 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/') ?: return@mapNotNull null
             if (!inProject(cwd)) return@mapNotNull null
+            if (f.name.removeSuffix(".json") in foreign) return@mapNotNull null
             val finished = o.str("hook_event_name") == "Stop"
             // Nach einer Freigabe im Terminal arbeitet Claude weiter, ohne dass ein Hook die Datei löscht: Das Protokoll
             // der Session ist dann jünger als die Meldung.
@@ -384,7 +411,7 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         val waitingIds = found.map { it.id }.toSet()
         val newWorking = byName.values.filter { it.name.endsWith(".busy") }.mapNotNull { f ->
             val id = f.name.removeSuffix(".busy")
-            if (id in waitingIds) return@mapNotNull null
+            if (id in waitingIds || id in foreign) return@mapNotNull null
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/')
             if (!inProject(cwd)) return@mapNotNull null
