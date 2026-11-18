@@ -124,7 +124,8 @@ and wait with handoff_wait_for_result.
 
 ### Images to review or choose from
 
-One image to approve, or several variants to pick one. The eye icon opens a viewer with zoom and paging (← →), where you
+One image to approve, or several variants to pick one; **Approve All** approves all of them at once when they are
+previews rather than variants. A note you typed always goes along, also with **Dismiss** or the ✕. The eye icon opens a viewer with zoom and paging (← →), where you
 mark areas with a frame and a note for Claude: drag on a free spot to draw a frame, click a frame to select it (drag its
 corners to resize, its number to move it).
 
@@ -228,6 +229,8 @@ in a terminal tab in the background and opens the session in an editor tab:
 - Type `/` in the prompt field: a list suggests slash commands (built-in ones, your commands and skills, those of your
   plugins), also in the middle of a prompt after a space. **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes
   it for this `/`; a space or letters that match no command close it too. Only where slash commands reach the session.
+  After `/model ` and `/effort ` the list shows their values; sent without a value, they ask for one instead of
+  opening Claude Code's picker in the terminal.
 - When Claude asks a question with options (Claude Code's own *AskUserQuestion*), it shows as a card at the end of the
   conversation (and in the Handoff tool window): pick, add your own answer, **Submit** - Claude gets the answer right away.
   **Answer in Terminal** lets Claude Code show its own dialog in the terminal instead. Works for sessions in a Handoff tab

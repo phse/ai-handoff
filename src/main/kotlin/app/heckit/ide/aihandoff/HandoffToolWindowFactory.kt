@@ -629,20 +629,25 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val timeLabel = hl.getLayoutComponent(BorderLayout.EAST)
         if (timeLabel != null) header.remove(timeLabel)
         header.add(JPanel(BorderLayout()).apply { isOpaque = false; timeLabel?.let { add(it, BorderLayout.CENTER) }; add(close, BorderLayout.EAST) }, BorderLayout.EAST)
-        val listener = object : java.awt.event.MouseAdapter() {
-            fun check(e: java.awt.event.MouseEvent) {
-                val p = SwingUtilities.convertPoint(e.component, e.point, card)
-                val inside = p.x >= 0 && p.y >= 0 && p.x < card.width && p.y < card.height
-                if (close.isVisible != inside) { close.isVisible = inside; header.revalidate(); header.repaint() }
-            }
-            override fun mouseEntered(e: java.awt.event.MouseEvent) = check(e)
-            override fun mouseExited(e: java.awt.event.MouseEvent) = check(e)
+        // Nicht per MouseListener an jedem Kind: Ein Listener am Kind schluckt dessen Mausereignisse, dann bekam die
+        // Bildkachel kein Enter/Moved mehr und ihr Auge flackerte oder fehlte (1.8.0, 2026-11-18). Darum global mithören.
+        val listener = java.awt.event.AWTEventListener { ev ->
+            val e = ev as? java.awt.event.MouseEvent ?: return@AWTEventListener
+            if (e.id != java.awt.event.MouseEvent.MOUSE_MOVED && e.id != java.awt.event.MouseEvent.MOUSE_EXITED && e.id != java.awt.event.MouseEvent.MOUSE_ENTERED) return@AWTEventListener
+            if (!card.isShowing || e.component == null) return@AWTEventListener
+            val p = SwingUtilities.convertPoint(e.component, e.point, card)
+            val inside = p.x >= 0 && p.y >= 0 && p.x < card.width && p.y < card.height &&
+                SwingUtilities.getWindowAncestor(e.component) === SwingUtilities.getWindowAncestor(card)
+            if (close.isVisible != inside) { close.isVisible = inside; header.revalidate(); header.repaint() }
         }
-        fun install(c: java.awt.Component) {
-            c.addMouseListener(listener)
-            if (c is java.awt.Container) c.components.forEach { install(it) }
+        val mask = java.awt.AWTEvent.MOUSE_EVENT_MASK or java.awt.AWTEvent.MOUSE_MOTION_EVENT_MASK
+        card.addHierarchyListener { e ->
+            if (e.changeFlags and java.awt.event.HierarchyEvent.DISPLAYABILITY_CHANGED.toLong() == 0L) return@addHierarchyListener
+            java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(listener)
+            if (card.isDisplayable) java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(listener, mask)
+            else close.isVisible = false
         }
-        install(card)
+        if (card.isDisplayable) java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(listener, mask)
         return card
     }
 
@@ -1059,7 +1064,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val single = p.images.size == 1
         val status = when (p.state) {
             Proposal.State.PENDING -> if (single) "Review image" else "Choose one of ${p.images.size}"
-            Proposal.State.FINISHED -> if (single) "Approved" else "Chose ${(p.chosen ?: 0) + 1}"
+            Proposal.State.FINISHED -> if (single) "Approved" else if (p.chosen == Proposal.ALL) "Approved all" else "Chose ${(p.chosen ?: 0) + 1}"
             else -> "Dismissed"
         } + (p.note?.let { ": $it" } ?: "")
         card.add(JPanel(BorderLayout()).apply {
@@ -1162,11 +1167,18 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             choose.primary()
             choose.addActionListener { p.selected?.let { service.choose(p, it, note.text) } }
             val dismiss = dismissButton("Dismiss").apply { addActionListener { service.dismiss(p, note.text) } }
+            // Mehrere Bilder sind oft Vorschauen zum Prüfen, nicht zur Wahl: alle auf einmal freigeben (2026-11-18).
+            val approveAll = JButton("Approve All").apply {
+                toolTipText = "Approve all images instead of choosing one"
+                addActionListener { service.choose(p, Proposal.ALL, note.text) }
+            }
             card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
                 isOpaque = false
                 add(Dictation.withMic(note), BorderLayout.NORTH)
                 add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
-                    isOpaque = false; add(choose); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
+                    isOpaque = false; add(choose); add(Box.createHorizontalStrut(JBUI.scale(6)))
+                    if (!single) { add(approveAll); add(Box.createHorizontalStrut(JBUI.scale(6))) }
+                    add(dismiss)
                 }, BorderLayout.SOUTH)
             }, BorderLayout.SOUTH)
         }

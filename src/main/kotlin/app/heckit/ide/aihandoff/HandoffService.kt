@@ -74,6 +74,8 @@ class Proposal(
     @Volatile var note: String? = null
     /** Gewähltes Bild (Index in [images]). */
     @Volatile var chosen: Int? = null
+    /** [chosen] = ALL: mehrere Bilder als Vorschau, alle freigegeben statt eines gewählt. */
+    companion object { const val ALL = -1 }
     /** Nur Oberfläche: markiertes Bild und angefangene Notiz, damit sie ein Neuzeichnen der Liste überstehen. */
     @Volatile var selected: Int? = null
     @Volatile var noteDraft: String = ""
@@ -158,7 +160,11 @@ class Proposal(
             }
             Proposal.State.FINISHED if images.isNotEmpty() -> buildString {
                 val i = chosen ?: 0
-                append(if (images.size == 1) "approved by the user." else "the user chose image ${i + 1} of ${images.size}: ${images[i]}.")
+                append(when {
+                    images.size == 1 -> "approved by the user."
+                    i == ALL -> "the user approved all ${images.size} images."
+                    else -> "the user chose image ${i + 1} of ${images.size}: ${images[i]}."
+                })
                 note?.let { append(" Note: $it") }
                 marksText().takeIf { it.isNotEmpty() }?.let { append("\n").append(it) }
             }
@@ -264,7 +270,7 @@ class HandoffService(private val project: Project) {
 
     fun choose(p: Proposal, index: Int, note: String?) {
         p.chosen = index
-        p.note = note?.takeIf { it.isNotBlank() }
+        p.note = note?.takeIf { it.isNotBlank() } ?: p.noteDraft.takeIf { it.isNotBlank() }
         p.state = Proposal.State.FINISHED
         p.done.complete(Unit)
         fireChanged()
@@ -279,13 +285,21 @@ class HandoffService(private val project: Project) {
         val sessions = WaitingSessions.getInstance(project)
         // Fragen von Claude Code beantwortet der Hook selbst - nichts nachzustellen.
         if (p.askSession == null) {
-            p.session = sessions.working.singleOrNull()?.id ?: sessions.working.maxByOrNull { it.since }?.id
-            p.sessionSure = sessions.working.size == 1
+            // Arbeiten mehrere Sessions, die eingrenzen, in deren Ordner die Pfade der Karte liegen (Bilder, Arbeitsordner);
+            // der tiefste passende Ordner gewinnt, wenn er eindeutig ist.
+            val working = sessions.working
+            val paths = (p.images + p.workingDir).filter { it.isNotBlank() }.map { it.trimEnd('/') }
+            fun under(cwd: String) = paths.any { it == cwd || it.startsWith("$cwd/") }
+            val fitting = if (working.size > 1 && paths.isNotEmpty()) working.filter { under(it.cwd) } else working
+            val deepest = fitting.maxOfOrNull { it.cwd.length }?.let { len -> fitting.filter { it.cwd.length == len } }.orEmpty()
+            p.session = deepest.singleOrNull()?.id ?: working.maxByOrNull { it.since }?.id
+            p.sessionSure = deepest.size == 1
         }
         proposals.add(0, p)
         p.done.invokeOnCompletion {
             javax.swing.Timer(DELIVER_AFTER_MS) {
-                val id = p.session ?: return@Timer
+                // Nur an eine sicher bekannte Session - geraten landete das Ergebnis in einer fremden Session (2026-11-18).
+                val id = p.owner ?: return@Timer
                 if (p.fetched || project.isDisposed) return@Timer
                 val text = "Result of ${p.id}, which you handed over earlier through Handoff (you were no longer waiting for it):\n" + p.resultText()
                 if (sessions.reply(id, text)) p.fetched = true
@@ -305,7 +319,9 @@ class HandoffService(private val project: Project) {
     }
 
     fun dismiss(p: Proposal, note: String?) {
-        p.note = note?.takeIf { it.isNotBlank() }
+        // Getippte Notiz nie verlieren - auch nicht bei ✕ oder wenn eine andere Ansicht der Karte (Tool Window /
+        // Session-Reiter) den Knopf auslöst (2026-11-18: "Alle perfekt" kam als Schließen ohne Notiz an).
+        p.note = note?.takeIf { it.isNotBlank() } ?: p.noteDraft.takeIf { it.isNotBlank() }
         p.state = Proposal.State.DISMISSED
         if (Layout.removeOnDismiss) p.hidden = true
         p.done.complete(Unit)

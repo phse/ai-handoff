@@ -27,6 +27,33 @@ import javax.swing.text.JTextComponent
 class SlashCommand(val name: String, val description: String, val source: String)
 
 /**
+ * Werte für Befehle, die ohne Wert eine Auswahl im Terminal öffnen (im Session-Reiter unsichtbar - die Session wirkte
+ * dann hängend, 2026-11-18). Werte aus `claude --help` und dem Programm von Claude Code 2.1.327.
+ */
+object SlashArguments {
+    val values: Map<String, List<SlashCommand>> = mapOf(
+        "effort" to listOf(
+            SlashCommand("low", "Fast, little thinking", ""),
+            SlashCommand("medium", "Balanced", ""),
+            SlashCommand("high", "More thinking", ""),
+            SlashCommand("xhigh", "Even more thinking", ""),
+            SlashCommand("max", "Deepest thinking, slowest", ""),
+        ),
+        "model" to listOf(
+            SlashCommand("default", "The recommended model for your plan", ""),
+            SlashCommand("fable", "Latest Fable", ""),
+            SlashCommand("opus", "Latest Opus", ""),
+            SlashCommand("sonnet", "Latest Sonnet", ""),
+            SlashCommand("haiku", "Latest Haiku, fastest", ""),
+            SlashCommand("opusplan", "Opus in plan mode, Sonnet otherwise", ""),
+        ),
+    )
+
+    /** Befehl ohne Wert, der eine Auswahl im Terminal öffnen würde. */
+    fun needsValue(text: String): String? = text.trim().removePrefix("/").takeIf { text.trim().startsWith("/") && it in values }
+}
+
+/**
  * Welche Slash-Befehle es gibt. Eingebaute fest hinterlegt (Claude Code meldet sie nirgends), dazu eigene Befehle
  * (`.claude/commands`), Skills (`.claude/skills`) - global und im Projekt - und die der eingeschalteten Plugins.
  */
@@ -165,6 +192,11 @@ class SlashCompletion(
                     append("  " + value.description, SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     return
                 }
+                if (argMode != null) {
+                    append(value.name)
+                    append("  " + value.description, SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    return
+                }
                 if (resumeMode) {
                     append(value.description.ifBlank { value.name.take(8) })
                     append("  " + value.source, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
@@ -182,6 +214,8 @@ class SlashCompletion(
     private var popup: JBPopup? = null
     /** `/resume <...>`: Liste der früheren Sessions statt der Befehle. */
     private var resumeMode = false
+    /** Werteliste für /model bzw. /effort: der Befehl. */
+    private var argMode: String? = null
     /** `@…`: offene Editor-Dateien statt Befehle; [SlashCommand.source] hält dann den Pfad. */
     private var fileMode = false
     /** Anfang (Position des `/`) des Befehls, für den die Liste gerade gilt. */
@@ -229,6 +263,18 @@ class SlashCompletion(
             return
         }
         resumeMode = false
+        argMode = null
+        Regex("^/(\\w+) (\\S*)$").find(text)?.let { m ->
+            val values = SlashArguments.values[m.groupValues[1]] ?: return@let
+            val q = m.groupValues[2]
+            val hits = values.filter { it.name.startsWith(q, ignoreCase = true) }
+            if (hits.isEmpty() || (hits.size == 1 && hits[0].name == q)) return hide()
+            argMode = m.groupValues[1]; slashAt = 0
+            model.clear(); hits.forEach(model::addElement)
+            list.selectedIndex = 0
+            if (!isVisible) show() else place()
+            return
+        }
         fileMode = false
         // `@` am Anfang oder nach Leerraum: offene Dateien als Kontext (geht auch ohne Terminal - es ist nur Text).
         run {
@@ -348,6 +394,7 @@ class SlashCompletion(
         val c = list.selectedValue ?: return hide()
         hide()
         if (resumeMode) { area.text = "/resume " + c.name; area.caretPosition = area.text.length; return }
+        argMode?.let { area.text = "/$it " + c.name; area.caretPosition = area.text.length; return }
         if (fileMode) {
             val caret = area.caretPosition.coerceIn(slashAt, area.text.length)
             val insert = fileToken(c.source) + " "
@@ -360,7 +407,7 @@ class SlashCompletion(
         area.text = area.text.substring(0, slashAt) + insert + area.text.substring(caret).trimStart(' ')
         area.caretPosition = slashAt + insert.length
         // Gleich die Sessions zeigen.
-        if (c.name == "resume") later()
+        if (c.name == "resume" || c.name in SlashArguments.values) later()
     }
 }
 

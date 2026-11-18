@@ -897,8 +897,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
             kit.styleSheet.addRule(".summary { color: $grey; margin-left: 14px; }")
             kit.styleSheet.addRule(".divider { color: $grey; text-align: center; margin-top: 8px; margin-bottom: 8px; }")
             kit.styleSheet.addRule(".pending { color: $grey; }")
-            kit.styleSheet.addRule(".time { color: $grey; font-size: 90%; padding: 0 0 0 ${JBUI.scale(12)}px; text-align: right; }")
-            kit.styleSheet.addRule("td.prompt { padding: 0; }")
+            kit.styleSheet.addRule(".time { color: $grey; font-size: 90%; padding: 0 0 0 ${JBUI.scale(12)}px; text-align: right; vertical-align: top; }")
+            kit.styleSheet.addRule("td.prompt { padding: 0; vertical-align: top; }")
         }
 
     private val pane = JEditorPane().apply {
@@ -1448,7 +1448,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
         Dictation.toggle(::done)
     }
 
+    private fun askValue(cmd: String) {
+        input.text = cmd.trim() + " "
+        input.caretPosition = input.text.length
+        input.requestFocusInWindow()
+        hint.text = "Pick a value - without one, Claude Code opens a picker in the terminal."
+    }
+
     private fun runCommand(cmd: String) {
+        if (SlashArguments.needsValue(cmd) != null) { askValue(cmd); return }
         val tab = file.tab ?: return
         if (terminalOpen && SessionTerminals.send(project, tab, cmd)) {
             // Wie beim Senden gleich als Prompt mit "Queued" zeigen - ohne Rückmeldung wirkte ▶ (etwa bei /compact, das
@@ -1646,6 +1654,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
             return
         }
         val shown = input.text.trim().takeIf { it.isNotEmpty() } ?: return
+        // /model, /effort ohne Wert öffneten eine unsichtbare Auswahl im Terminal: stattdessen die Werteliste zeigen.
+        if (SlashArguments.needsValue(shown) != null) { askValue(shown); return }
         if (resumeFromTab(shown)) return
         val text = expanded(shown)
         endDictation()

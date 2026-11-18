@@ -69,6 +69,15 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.8.1</h3>
+            <ul>
+              <li>After <code>/model </code> and <code>/effort </code> the slash list suggests their values; without a value they ask for
+                  one instead of opening Claude Code's picker in the terminal (which made the session look stuck).</li>
+              <li>Image cards with several images have <b>Approve All</b> for previews that are not variants.</li>
+              <li>A typed note always goes to Claude, also with <i>Dismiss</i> or the ✕.</li>
+              <li>Fixes: the eye on image tiles shows again on hover; a late result goes only to the session that sent the card;
+                  the time in a prompt bubble sits in its first line.</li>
+            </ul>
             <h3>1.8.0</h3>
             <ul>
               <li>Session tab: prompts as speech bubbles with the time, tool steps open with input and output, errors, durations
