@@ -674,6 +674,20 @@ class Transcript(val path: String) {
             // Zweig blieb der Befehl im Tab ewig "Queued", obwohl er längst gelaufen war (2026-11-16).
             "system" -> when (o.str("subtype")) {
                 "local_command" -> o.str("content")?.let { userText(it) }?.let { entries += it }
+                // Unbekannter Befehl/Skill: Claude Code schreibt nur Warnungen, keinen Prompt - der Befehl blieb im Tab bei
+                // "Running…" (2026-11-18). Als Prompt mit der Warnung darunter zeigen; die Args-Zeile hängt am Prompt.
+                "informational" -> o.str("content")?.let { c ->
+                    val unknown = Regex("^Unknown (?:command|skill): (/\\S+)").find(c)?.groupValues?.get(1)
+                    val args = Regex("^Args from unknown skill: (.*)$").find(c)?.groupValues?.get(1)
+                    when {
+                        unknown != null -> { userText(unknown)?.let { it.time = time(o); entries += it }; entries += TranscriptEntry(TranscriptEntry.Kind.INFO, "⚠ $c") }
+                        args != null -> entries.lastOrNull { it.kind == TranscriptEntry.Kind.USER }?.let { u ->
+                            entries[entries.lastIndexOf(u)] = TranscriptEntry(TranscriptEntry.Kind.USER, u.text + " " + args).also { it.time = u.time }
+                        }
+                        o.str("level") == "warning" -> entries += TranscriptEntry(TranscriptEntry.Kind.INFO, "⚠ $c")
+                        else -> {}
+                    }
+                }
                 "turn_duration" -> o.get("durationMs")?.asLong?.let { entries += TranscriptEntry(TranscriptEntry.Kind.INFO, "⏱ Worked for " + duration(it)) }
                 "compact_boundary" -> {
                     val m = o.getAsJsonObject("compactMetadata")
@@ -1011,7 +1025,14 @@ private class SessionEditor(private val project: Project, private val file: Sess
             if (!scroll.isShowing) return@addChangeListener
             val bar = scroll.verticalScrollBar
             val w = scroll.viewport.width
-            if (w != lastWidth) { lastWidth = w; if (stickToEnd) scrollToEnd() else restoreAnchor() }
+            // Auch eine Höhenänderung ohne neue Breite (Umbruch kommt verzögert, Bilder laden nach) ist kein Scrollen des
+            // Nutzers: dann zurück zur gemerkten Stelle statt sie zu überschreiben - sonst sprang die Ansicht beim Öffnen
+            // des Handoff-Fensters weiter nach oben (2026-11-18, zweites Mal).
+            val h = bar.maximum
+            if (w != lastWidth || (h != lastHeight && !renderingNow)) {
+                lastWidth = w; lastHeight = h
+                if (stickToEnd) scrollToEnd() else restoreAnchor()
+            }
             else if (!restoring) {
                 stickToEnd = bar.value + bar.visibleAmount >= bar.maximum - JBUI.scale(40)
                 anchor = anchorAt(bar.value)
@@ -1025,6 +1046,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
      * beim Öffnen des Handoff-Fensters weit nach oben (2026-11-18).
      */
     private var anchor: Pair<Int, Int>? = null
+    private var lastHeight = -1
+    /** Neuer Inhalt wird gerade gesetzt - dessen Höhenänderung ist gewollt (renderTranscript scrollt selbst). */
+    private var renderingNow = false
     private var restoring = false
 
     private fun anchorAt(y: Int): Pair<Int, Int>? = runCatching {
@@ -1051,7 +1075,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     // abschneiden (2026-11-16, Unterlängen fehlten).
     private val status = object : JBLabel() { override fun getMinimumSize() = java.awt.Dimension(0, preferredSize.height) }
     /** Arbeitsordner der Session; Klick zeigt ihn im Finder bzw. Explorer. */
-    private val dirLink = object : ActionLink("", { _: java.awt.event.ActionEvent -> (file.cwd ?: baseDir())?.let { com.intellij.ide.actions.RevealFileAction.openDirectory(File(it)) } }) {
+    private val dirLink = object : ActionLink("", { _: java.awt.event.ActionEvent -> currentDir()?.let { com.intellij.ide.actions.RevealFileAction.openDirectory(File(it)) } }) {
         override fun getMinimumSize() = java.awt.Dimension(0, preferredSize.height)
     }.apply {
         foreground = UIUtil.getContextHelpForeground()
@@ -1090,7 +1114,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private fun updateHeaderTip() {
         val lines = mutableListOf<String>()
         status.text?.takeIf { it.isNotBlank() }?.let { lines += it }
-        (file.cwd ?: baseDir())?.let { lines += it }
+        currentDir()?.let { lines += it }
         lines += limitTips
         val tip = lines.joinToString("<br>") { StringUtil.escapeXmlEntities(it) }.takeIf { it.isNotEmpty() }?.let { "<html>$it</html>" }
         if (status.toolTipText != tip) status.toolTipText = tip
@@ -1407,7 +1431,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     /** Liste der Slash-Befehle: ausführen oder an der Schreibmarke in den Prompt übernehmen. */
     private val commands = SmallButton("/").apply {
         toolTipText = "Slash commands: run one or insert it at the cursor"
-        addActionListener { SlashPicker.show(project, this, run = ::runCommand, insert = ::insertCommand) }
+        addActionListener { SlashPicker.show(project, this, run = ::runCommand, insert = ::insertCommand, dir = currentDir()) }
     }
 
     /**
@@ -1455,8 +1479,15 @@ private class SessionEditor(private val project: Project, private val file: Sess
         hint.text = "Pick a value - without one, Claude Code opens a picker in the terminal."
     }
 
+    /** Befehl öffnet einen Dialog im Terminal: dorthin wechseln und sagen, warum. */
+    private fun showDialogTerminal(tab: String) {
+        SessionTerminals.show(project, tab)
+        hint.text = "This command opens a dialog in the terminal - use it there, Esc closes it."
+    }
+
     private fun runCommand(cmd: String) {
         if (SlashArguments.needsValue(cmd) != null) { askValue(cmd); return }
+        if (SlashArguments.opensDialog(cmd)) file.tab?.let { t -> SwingUtilities.invokeLater { showDialogTerminal(t) } }
         val tab = file.tab ?: return
         if (terminalOpen && SessionTerminals.send(project, tab, cmd)) {
             // Wie beim Senden gleich als Prompt mit "Queued" zeigen - ohne Rückmeldung wirkte ▶ (etwa bei /compact, das
@@ -1606,7 +1637,29 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private val sessionId get() = file.currentSession(project)
     private val terminalOpen get() = file.tab?.let { SessionTerminals.isOpen(project, it) } == true
     /** Vorschläge für Slash-Befehle - nur, wenn sie die Session erreichen (Terminal). */
-    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }, enabled = { terminalOpen }, workDir = { baseDir() })
+    private val slash: SlashCompletion = SlashCompletion(project, input, fileToken = { mention(it) }, enabled = { terminalOpen }, workDir = { currentDir() },
+        currentValue = ::currentValue, onHint = { h -> if (h != argHint) { argHint = h; if (h != null) hint.text = h else updateState(sessionId) } })
+
+    /** Hinweis aus der Slash-Liste, was ein Befehl als Wert erwartet - hat Vorrang vor dem üblichen Hinweis. */
+    private var argHint: String? = null
+
+    /**
+     * Aktueller Arbeitsordner: nach `/cd` meldet ihn die Statuszeile von Claude Code (cwd) - so folgt die Kopfzeile dem
+     * Wechsel (2026-11-18); sonst der Startordner der Session.
+     */
+    private fun currentDir(): String? =
+        sessionId?.let { statusBySession[it] }?.get("cwd")?.takeIf { it.isJsonPrimitive }?.asString?.trimEnd('/') ?: file.cwd ?: baseDir()
+
+    /** Aktuelles Modell bzw. Effort aus statusline.json dieser Session; Modell als Alias (claude-opus-5-5 → opus). */
+    private fun currentValue(cmd: String): String? {
+        val o = sessionId?.let { statusBySession[it] } ?: return null
+        fun str(a: String, b: String) = o.getAsJsonObject(a)?.get(b)?.takeIf { it.isJsonPrimitive }?.asString
+        return when (cmd) {
+            "effort" -> str("effort", "level")
+            "model" -> str("model", "id")?.let { id -> listOf("fable", "opus", "sonnet", "haiku").firstOrNull { id.contains(it, ignoreCase = true) } }
+            else -> null
+        }
+    }
 
     /**
      * Diktat und Eingabemethode zurücksetzen, bevor das Feld geleert wird: Nach einem diktierten und abgeschickten Prompt
@@ -1687,6 +1740,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
             if (!file.busy) startedIdle += text
             pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
+            if (tab != null && SlashArguments.opensDialog(text)) showDialogTerminal(tab)
         }
         else {
             hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
@@ -1723,12 +1777,28 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     private var needsYou = false
 
+    /**
+     * Nach `/cd` verschiebt Claude Code das Protokoll in den Projektordner des neuen Arbeitsordners (Eintrag "relocated");
+     * die alte Datei ist dann weg und der Reiter blieb bei "Running…" stehen (2026-11-18). Dann per Session-ID suchen:
+     * zuerst der transcript_path der Statuszeile, sonst ~/.claude/projects/<ordner>/<id>.jsonl.
+     */
+    private fun relocated(path: String, id: String?): String {
+        if (id == null || File(path).isFile) return path
+        statusBySession[id]?.get("transcript_path")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { File(it).isFile }?.let { return it }
+        val now = System.currentTimeMillis()
+        if (now - relocateSearchAt < 3000) return path
+        relocateSearchAt = now
+        return File(System.getProperty("user.home"), ".claude/projects").listFiles().orEmpty()
+            .map { File(it, "$id.jsonl") }.firstOrNull { it.isFile }?.path ?: path
+    }
+    private var relocateSearchAt = 0L
+
     private fun refresh() {
         SessionEditors.needsYou(project, file).let { if (it != needsYou) { needsYou = it; updateTabTitle() } }
         val id = sessionId
         val info = id?.let { sessions.infos[it] }
         // Neue Session im selben Terminal (nach /clear): Protokoll wechseln.
-        val path = info?.transcript ?: file.transcript
+        val path = (info?.transcript ?: file.transcript)?.let { relocated(it, id) }
         if (path != null && file.transcript != path) { file.transcript = path; SessionEditors.save(project) }
         if (path != null && transcript?.path != path) { transcript = Transcript(path); loading = false; renderTranscript(force = true) }
         // Einlesen im Hintergrund - das erste Lesen eines langen Protokolls dauert.
@@ -1750,7 +1820,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // `claude --resume` findet die Session nur im Startordner (2026-11-15: Resume landete im Unterordner).
         (path?.let { SessionEditors.startDir(it) } ?: info?.cwd?.takeIf { file.cwd == null })
             ?.takeIf { it != file.cwd }?.let { file.cwd = it; updateTabTitle(); SessionEditors.save(project) }
-        (file.cwd ?: baseDir())?.let { SessionEditors.shortPath(it) }?.takeIf { it != dirLink.text }?.let { dirLink.text = it }
+        currentDir()?.let { SessionEditors.shortPath(it) }?.takeIf { it != dirLink.text }?.let { dirLink.text = it }
         updateState(id)
         updateSuggestion(id)
         updateLimits(id)
@@ -1839,7 +1909,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
      * `/compact Behalte nur …` oder `/session-kuerzen`), als Link mit ↗: Klick übernimmt den Befehl ins Eingabefeld.
      */
     private fun promptLinks(html: String): String {
-        val names = SlashCommands.all(project).mapTo(HashSet()) { it.name }
+        val names = SlashCommands.all(project, currentDir()).mapTo(HashSet()) { it.name }
         fun command(plain: String): String? {
             val t = plain.trim()
             val name = SLASH.matchAt(t, 0)?.groupValues?.get(1) ?: return null
@@ -1942,9 +2012,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         html.append("</body></html>")
         val value = bar.value
+        renderingNow = true
         pane.text = html.toString()
         if (search.isVisible) highlight(scrollTo = false)
         if (atEnd) scrollToEnd() else SwingUtilities.invokeLater { bar.value = value }
+        // Erst nach dem Layout des neuen Inhalts wieder auf fremde Höhenänderungen achten.
+        SwingUtilities.invokeLater { SwingUtilities.invokeLater { lastHeight = bar.maximum; renderingNow = false } }
     }
 
     /** Hintergrundaufgaben der Session - nur solange sie läuft (mit ihr enden auch die Aufgaben). */
@@ -2054,6 +2127,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
         applyEmptyText()
         hint.text = when {
+            argHint != null -> argHint!!
             terminal -> "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
             resumable -> "Not running in the IDE terminal. Resume continues it there (claude --resume); only if it is not still open elsewhere."

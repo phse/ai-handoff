@@ -238,7 +238,7 @@ in a terminal tab in the background and opens the session in an editor tab:
 - **Open Session Log (.jsonl)** opens the raw transcript in a readable view; **Export Session as Markdown…** saves the
   conversation as a Markdown file.
 - The tab is named after the session ("New Session" until Claude Code gives it a title). The header shows the
-  session's folder (click to reveal it), the tab's tooltip too.
+  session's folder (click to reveal it), the tab's tooltip too; after `/cd` it follows the new folder.
 - At the bottom, a field for your prompt: **Enter** sends it, **Shift+Enter** adds a line. It goes to the terminal as
   if you had typed it, so slash commands like `/clear` or `/compact` work too. After `/clear` the tab follows the new
   session.
@@ -248,7 +248,11 @@ in a terminal tab in the background and opens the session in an editor tab:
   plugins), also in the middle of a prompt after a space. **↑/↓** picks, **Enter** or **Tab** takes it, **Esc** closes
   it for this `/`; a space or letters that match no command close it too. Only where slash commands reach the session.
   After `/model ` and `/effort ` the list shows their values; sent without a value, they ask for one instead of
-  opening Claude Code's picker in the terminal.
+  opening Claude Code's picker in the terminal. Other values come from the command's or skill's `argument-hint`
+  (e.g. `[on|off]`, also in your own skills), `/mcp` offers its actions and servers, `/help` the commands, `/cd` and
+  `/add-dir` folders. The line below the field shows what a command expects. Commands and skills come from the
+  session's working folder. Commands that open a dialog in the terminal (e.g. `/mcp`, `/config`) bring the terminal
+  to the front.
 - When Claude asks a question with options (Claude Code's own *AskUserQuestion*), it shows as a card at the end of the
   conversation (and in the Handoff tool window): pick, add your own answer, **Submit** - Claude gets the answer right away.
   **Answer in Terminal** lets Claude Code show its own dialog in the terminal instead. Works for sessions in a Handoff tab
@@ -287,7 +291,7 @@ in a terminal tab in the background and opens the session in an editor tab:
   Handoff are told at start to link as much as possible (action ids via `search_ide_actions`) and to show images with
   `handoff_show_images` instead of opening them in another app.
 - Type `@` in the prompt field (also mid-prompt): a list shows the files open in the editor, the current one first; typing
-  filters. From two typed letters on, matching files from the whole project follow below the open ones. This works in projects only, not in the IDE's home/welcome project. The chosen file shows short as *[@name.md #1]* and goes to Claude as an `@path` mention, so Claude reads it.
+  filters. From two typed letters on, matching files from the session's working folder and below follow the open ones. This works in projects only, not in the IDE's home/welcome project. The chosen file shows short as *[@name.md #1]* and goes to Claude as an `@path` mention, so Claude reads it.
   Use it to give a file as context on purpose.
 - Drop image files onto the prompt field, or paste a screenshot (⌘V): the field shows them short as *[Image #1]* (other
   files as *[File #2: name]*), Claude gets the file path and reads the image. A short name acts like one character:
@@ -386,6 +390,12 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 ## Version history
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
+
+### 1.9.0
+
+The slash list suggests values from each command's or skill's `argument-hint`, and `/mcp`, `/help`, `/cd` and `/add-dir`
+get their own lists. Skills and `@` files come from the session's folder; `/cd` is followed. The view keeps its place
+when the Handoff window opens.
 
 ### 1.8.1
 

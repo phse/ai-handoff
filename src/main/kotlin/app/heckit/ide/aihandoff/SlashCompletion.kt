@@ -24,33 +24,143 @@ import javax.swing.event.DocumentListener
 import javax.swing.text.JTextComponent
 
 /** Ein Slash-Befehl von Claude Code: eingebaut, eigener Befehl, Skill oder aus einem Plugin. */
-class SlashCommand(val name: String, val description: String, val source: String)
+class SlashCommand(val name: String, val description: String, val source: String, val hint: String = "")
+
+/** Punkt vor dem aktuellen Wert in der Werteliste (/model, /effort). */
+private object CurrentDot : javax.swing.Icon {
+    override fun getIconWidth() = com.intellij.util.ui.JBUI.scale(12)
+    override fun getIconHeight() = com.intellij.util.ui.JBUI.scale(12)
+    override fun paintIcon(c: java.awt.Component?, g: java.awt.Graphics, x: Int, y: Int) {
+        val g2 = g.create() as java.awt.Graphics2D
+        g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+        g2.color = c?.foreground ?: com.intellij.util.ui.UIUtil.getLabelForeground()
+        val d = com.intellij.util.ui.JBUI.scale(6)
+        g2.fillOval(x + (iconWidth - d) / 2, y + (iconHeight - d) / 2, d, d)
+        g2.dispose()
+    }
+}
 
 /**
  * Werte für Befehle, die ohne Wert eine Auswahl im Terminal öffnen (im Session-Reiter unsichtbar - die Session wirkte
  * dann hängend, 2026-11-18). Werte aus `claude --help` und dem Programm von Claude Code 2.1.327.
  */
 object SlashArguments {
-    val values: Map<String, List<SlashCommand>> = mapOf(
-        "effort" to listOf(
-            SlashCommand("low", "Fast, little thinking", ""),
-            SlashCommand("medium", "Balanced", ""),
-            SlashCommand("high", "More thinking", ""),
-            SlashCommand("xhigh", "Even more thinking", ""),
-            SlashCommand("max", "Deepest thinking, slowest", ""),
-        ),
-        "model" to listOf(
-            SlashCommand("default", "The recommended model for your plan", ""),
-            SlashCommand("fable", "Latest Fable", ""),
-            SlashCommand("opus", "Latest Opus", ""),
-            SlashCommand("sonnet", "Latest Sonnet", ""),
-            SlashCommand("haiku", "Latest Haiku, fastest", ""),
-            SlashCommand("opusplan", "Opus in plan mode, Sonnet otherwise", ""),
-        ),
+    private fun v(vararg p: Pair<String, String>) = p.map { SlashCommand(it.first, it.second, "") }
+
+    /** Feste Werte je Befehl (argumentHint der eingebauten Befehle in Claude Code 2.1.327). */
+    val fixed: Map<String, List<SlashCommand>> = mapOf(
+        "effort" to v("low" to "Fast, little thinking", "medium" to "Balanced", "high" to "More thinking",
+            "xhigh" to "Even more thinking", "max" to "Deepest thinking, slowest"),
+        "model" to v("default" to "The recommended model for your plan", "fable" to "Latest Fable", "opus" to "Latest Opus",
+            "sonnet" to "Latest Sonnet", "haiku" to "Latest Haiku, fastest", "opusplan" to "Opus in plan mode, Sonnet otherwise"),
     )
 
+    /** Diese öffnen ohne Wert eine Auswahl im Terminal (im Session-Reiter unsichtbar - die Session wirkte hängend). */
+    private val pickers = setOf("effort", "model")
+
+    /** Hinweise der eingebauten Befehle (argumentHint in Claude Code 2.1.327). */
+    val hints: Map<String, String> = mapOf(
+        "add-dir" to "<path>", "autocompact" to "[auto|<tokens>]", "background" to "[prompt]", "branch" to "[name]",
+        "btw" to "[question]", "bug" to "[report]", "cd" to "<path>", "clear" to "[name]",
+        "compact" to "<optional custom summarization instructions>", "config" to "[key=value]", "context" to "[all]",
+        "debug" to "[issue description]", "effort" to "<level>", "export" to "[filename]", "feedback" to "[report]",
+        "focus" to "[on|off]", "fork" to "[prompt]", "goal" to "[<condition> | clear]", "help" to "[command]", "ide" to "[open]",
+        "import" to "[codex|gemini|cursor] [--dry-run]", "mcp" to "[reconnect|enable|disable [<server>|all]]", "model" to "<model>",
+        "output-style" to "[style]", "plan" to "[open|<description>]", "rename" to "[name]", "tui" to "[classic|fullscreen]",
+        "voice" to "[hold|tap|off]",
+    )
+
+    /**
+     * Befehle, die ohne Wert einen Dialog im Terminal öffnen (Verwaltung, Auswahl) und bis zum Schließen nichts ins
+     * Protokoll schreiben - im Session-Reiter blieben sie bei "Running…" (2026-11-18: /mcp). Nach dem Senden kommt das
+     * Terminal nach vorn. Liste nach Bedienung von Claude Code 2.1.327, nicht vollständig nachgelesen.
+     */
+    private val dialogs = setOf("mcp", "config", "permissions", "agents", "hooks", "memory", "plugin", "output-style",
+        "theme", "rewind", "export", "status", "usage", "login", "ide", "doctor", "tui", "voice")
+
+    fun opensDialog(text: String): Boolean = text.trim().takeIf { it.startsWith("/") }?.removePrefix("/")?.let { it in dialogs } == true
+
     /** Befehl ohne Wert, der eine Auswahl im Terminal öffnen würde. */
-    fun needsValue(text: String): String? = text.trim().removePrefix("/").takeIf { text.trim().startsWith("/") && it in values }
+    fun needsValue(text: String): String? = text.trim().takeIf { it.startsWith("/") }?.removePrefix("/")?.takeIf { it in pickers }
+
+    /** Folgen nach diesem Wert weitere (Unterordner, Server nach reconnect)? Dann die Liste gleich wieder zeigen. */
+    fun continues(cmd: String, done: List<String>) = cmd in setOf("cd", "add-dir") || (cmd == "mcp" && done.isEmpty())
+
+    /**
+     * Vorschläge für das Wort an der Schreibmarke: [done] = schon getippte Werte davor, [query] = das angefangene Wort.
+     * Null, wenn der Befehl keine Werte kennt.
+     */
+    fun values(project: Project, cmd: String, done: List<String>, query: String, workDir: String?): List<SlashCommand>? {
+        val all: List<SlashCommand> = when {
+            done.isEmpty() && cmd in fixed -> fixed.getValue(cmd)
+            cmd == "mcp" && done.isEmpty() -> v("reconnect" to "Reconnect a server", "enable" to "Enable a server", "disable" to "Disable a server")
+            cmd == "mcp" && done.size == 1 && done[0] in setOf("reconnect", "enable", "disable") ->
+                mcpServers(workDir).map { SlashCommand(it, "MCP server", "") } + v("all" to "All servers")
+            cmd == "help" && done.isEmpty() -> SlashCommands.all(project, workDir).map { SlashCommand(it.name, it.description, "") }
+            (cmd == "cd" || cmd == "add-dir") && done.isEmpty() -> return folders(query, workDir)
+            // Sonst aus dem argument-hint des Befehls oder Skills: feste Wörter wie in "[on|off]" - so bekommen auch
+            // eigene Skills Vorschläge, ohne dass Handoff sie kennt (2026-11-18).
+            else -> fromHint(SlashCommands.all(project, workDir).firstOrNull { it.name == cmd }?.hint.orEmpty(), done.size) ?: return null
+        }
+        return all.filter { it.name.startsWith(query, ignoreCase = true) }
+    }
+
+    /**
+     * Feste Werte aus einem argument-hint: die Gruppe an Position [index] (Gruppen durch Leerzeichen außerhalb von
+     * Klammern getrennt), Alternativen durch `|`. Platzhalter wie `<path>` und Freitext fallen weg.
+     * `[auto|<tokens>]` → auto, `[codex|gemini|cursor] [--dry-run]` → codex, gemini, cursor bzw. danach --dry-run.
+     */
+    fun fromHint(hint: String, index: Int): List<SlashCommand>? {
+        val groups = mutableListOf<String>()
+        var depth = 0; val cur = StringBuilder()
+        for (ch in hint.trim()) {
+            when {
+                ch == '[' || ch == '<' || ch == '(' -> { depth++; cur.append(ch) }
+                ch == ']' || ch == '>' || ch == ')' -> { depth--; cur.append(ch) }
+                ch == ' ' && depth == 0 -> { if (cur.isNotEmpty()) groups += cur.toString(); cur.clear() }
+                else -> cur.append(ch)
+            }
+        }
+        if (cur.isNotEmpty()) groups += cur.toString()
+        val g = groups.getOrNull(index) ?: return null
+        // Nur Gruppen in eckigen Klammern oder mit | sind Auswahlen; "<path>" oder "[prompt]" (ein Wort) ist Freitext.
+        val inner = g.removeSurrounding("[", "]")
+        if (!inner.contains('|') && !inner.startsWith("--")) return null
+        val words = inner.split('|').map { it.trim() }.filter { Regex("^-{0,2}[A-Za-z0-9][\\w.-]*$").matches(it) }
+        return words.takeIf { it.isNotEmpty() }?.map { SlashCommand(it, "", "") }
+    }
+
+    /** MCP-Server aus `~/.claude.json` (global und für den Ordner) und `.mcp.json` im Ordner. */
+    private fun mcpServers(workDir: String?): List<String> = runCatching {
+        val names = sortedSetOf<String>()
+        fun keys(o: com.google.gson.JsonObject?) { o?.getAsJsonObject("mcpServers")?.keySet()?.let(names::addAll) }
+        val home = File(System.getProperty("user.home"))
+        File(home, ".claude.json").takeIf { it.isFile }?.let { JsonParser.parseString(it.readText()).asJsonObject }?.let { root ->
+            keys(root)
+            workDir?.let { keys(root.getAsJsonObject("projects")?.getAsJsonObject(it)) }
+        }
+        workDir?.let { File(it, ".mcp.json") }?.takeIf { it.isFile }?.let { keys(JsonParser.parseString(it.readText()).asJsonObject) }
+        names.toList()
+    }.getOrDefault(emptyList())
+
+    /** Unterordner zum angefangenen Pfad (relativ zum Arbeitsordner, `~` für das Home), Name mit `/` am Ende. */
+    private fun folders(query: String, workDir: String?): List<SlashCommand> {
+        val home = System.getProperty("user.home")
+        val expanded = if (query.startsWith("~")) home + query.removePrefix("~") else query
+        val parentPart = expanded.substringBeforeLast('/', "")
+        val prefix = expanded.substringAfterLast('/')
+        val dir = when {
+            expanded.startsWith("/") -> File(parentPart.ifEmpty { "/" })
+            else -> File(workDir ?: return emptyList(), parentPart)
+        }
+        val typedParent = query.substringBeforeLast('/', "").let { if (query.contains('/')) "$it/" else "" }
+        return dir.listFiles().orEmpty().filter { it.isDirectory && it.name.startsWith(prefix, ignoreCase = !com.intellij.openapi.util.SystemInfoRt.isFileSystemCaseSensitive) }
+            .filter { prefix.startsWith(".") || !it.name.startsWith(".") }
+            .sortedBy { it.name.lowercase() }.take(50)
+            .map { SlashCommand(typedParent + it.name + "/", "", "") }
+            // Eine Ebene höher als erster Eintrag, solange nur Punkte getippt sind.
+            .let { list -> if (prefix.length < 2 && prefix.all { it == '.' } && dir.parentFile != null) listOf(SlashCommand("$typedParent../", "Parent folder", "")) + list else list }
+    }
 }
 
 /**
@@ -69,17 +179,30 @@ object SlashCommands {
         "rename" to "Rename the session", "add-dir" to "Add a working directory", "doctor" to "Check the installation",
         "login" to "Sign in", "logout" to "Sign out", "ide" to "Connect to an IDE", "statusline" to "Set up the status line",
         "release-notes" to "Show release notes", "fast" to "Toggle fast mode", "btw" to "Ask a side question",
-    ).map { (n, d) -> SlashCommand(n, d, "built-in") }
+        "cd" to "Change the working directory", "focus" to "Toggle focus mode", "tui" to "Switch the terminal UI",
+        "voice" to "Set up voice input", "autocompact" to "Set when to compact automatically", "goal" to "Set a goal for the session",
+        "import" to "Import settings from another tool", "plan" to "Plan mode", "output-style" to "Choose the output style",
+        "branch" to "Branch the conversation", "fork" to "Fork the session", "background" to "Run a prompt in the background",
+        "debug" to "Debug an issue", "feedback" to "Send feedback",
+    ).map { (n, d) -> SlashCommand(n, d, "built-in", SlashArguments.hints[n].orEmpty()) }
 
-    @Volatile private var cache: Pair<Long, List<SlashCommand>>? = null
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<SlashCommand>>>()
 
-    fun all(project: Project): List<SlashCommand> {
-        cache?.let { (at, list) -> if (System.currentTimeMillis() - at < 15_000) return list }
-        val home = File(System.getProperty("user.home"), ".claude")
-        val base = project.basePath?.let { File(it, ".claude") }
+    /**
+     * [dir] = Arbeitsordner der Session (sonst der Projektordner): Projekt-Befehle und -Skills aus seinem `.claude` und
+     * denen der Ordner darüber bis vor das Home - so passt die Liste zur Session, auch nach `/cd` (2026-11-18).
+     * Annahme, nicht nachgelesen: Claude Code sucht Projekt-Skills ebenso aufwärts wie CLAUDE.md.
+     */
+    fun all(project: Project, dir: String? = null): List<SlashCommand> {
+        val start = (dir ?: project.basePath)?.trimEnd('/')
+        cache[start.orEmpty()]?.let { (at, list) -> if (System.currentTimeMillis() - at < 15_000) return list }
+        val homeDir = File(System.getProperty("user.home"))
+        val home = File(homeDir, ".claude")
+        val local = generateSequence(start?.let(::File)) { it.parentFile }
+            .takeWhile { it != homeDir && it.parentFile != null }.map { File(it, ".claude") }.filter { it.isDirectory }.toList()
         val found = mutableListOf<SlashCommand>()
         runCatching {
-            listOfNotNull(base, home).forEach { dir ->
+            (local + home).forEach { dir ->
                 val label = if (dir == home) "user" else "project"
                 commands(File(dir, "commands"), "", label, found)
                 skills(File(dir, "skills"), "", label, found)
@@ -88,14 +211,15 @@ object SlashCommands {
         }
         // Eigene vor eingebauten, doppelte Namen nur einmal.
         val list = (found + BUILT_IN).distinctBy { it.name }.sortedBy { it.name }
-        cache = System.currentTimeMillis() to list
+        cache[start.orEmpty()] = System.currentTimeMillis() to list
         return list
     }
 
     private fun commands(dir: File, prefix: String, source: String, out: MutableList<SlashCommand>) {
         dir.walkTopDown().maxDepth(3).filter { it.isFile && it.extension == "md" }.forEach { f ->
             val rel = f.relativeTo(dir).path.removeSuffix(".md").replace(File.separatorChar, ':')
-            out += SlashCommand(prefix + rel, frontmatter(f)["description"].orEmpty(), source)
+            val fm = frontmatter(f)
+            out += SlashCommand(prefix + rel, fm["description"].orEmpty(), source, fm["argument-hint"].orEmpty())
         }
     }
 
@@ -103,7 +227,7 @@ object SlashCommands {
         dir.listFiles().orEmpty().filter { File(it, "SKILL.md").isFile }.forEach { d ->
             val fm = frontmatter(File(d, "SKILL.md"))
             if (fm["user-invocable"] == "false") return@forEach
-            out += SlashCommand(prefix + (fm["name"] ?: d.name), fm["description"].orEmpty(), source)
+            out += SlashCommand(prefix + (fm["name"] ?: d.name), fm["description"].orEmpty(), source, fm["argument-hint"].orEmpty())
         }
     }
 
@@ -180,6 +304,10 @@ class SlashCompletion(
     private val enabled: () -> Boolean,
     /** Arbeitsordner der Session - für `/resume` (Sessions dieses Ordners). */
     private val workDir: () -> String? = { null },
+    /** Aktueller Wert eines Befehls (/model, /effort) laut Statuszeile der Session - in der Werteliste markiert. */
+    private val currentValue: (String) -> String? = { null },
+    /** Hinweis unter dem Feld, was ein Befehl als Wert erwartet; null = keiner. */
+    private val onHint: (String?) -> Unit = {},
 ) {
     private val model = javax.swing.DefaultListModel<SlashCommand>()
     private val list = JBList(model).apply {
@@ -193,6 +321,8 @@ class SlashCompletion(
                     return
                 }
                 if (argMode != null) {
+                    // Aktueller Wert: Punkt links vor dem Namen, die anderen mit gleich breitem Leer-Icon - so stehen die Namen bündig.
+                    icon = if (current == value.name) CurrentDot else com.intellij.util.ui.EmptyIcon.create(CurrentDot.iconWidth, CurrentDot.iconHeight)
                     append(value.name)
                     append("  " + value.description, SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     return
@@ -203,6 +333,7 @@ class SlashCompletion(
                     return
                 }
                 append("/" + value.name)
+                if (value.hint.isNotBlank()) append(" " + value.hint, SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 append("  " + value.source, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                 if (value.description.isNotBlank()) append("  " + value.description.take(90), SimpleTextAttributes.GRAYED_ATTRIBUTES)
             }
@@ -216,6 +347,8 @@ class SlashCompletion(
     private var resumeMode = false
     /** Werteliste für /model bzw. /effort: der Befehl. */
     private var argMode: String? = null
+    private var argDone: List<String> = emptyList()
+    private var current: String? = null
     /** `@…`: offene Editor-Dateien statt Befehle; [SlashCommand.source] hält dann den Pfad. */
     private var fileMode = false
     /** Anfang (Position des `/`) des Befehls, für den die Liste gerade gilt. */
@@ -264,12 +397,21 @@ class SlashCompletion(
         }
         resumeMode = false
         argMode = null
-        Regex("^/(\\w+) (\\S*)$").find(text)?.let { m ->
-            val values = SlashArguments.values[m.groupValues[1]] ?: return@let
-            val q = m.groupValues[2]
-            val hits = values.filter { it.name.startsWith(q, ignoreCase = true) }
+        argDone = emptyList()
+        // Hinweis, was der Befehl erwartet (argument-hint), solange nach "/befehl " noch nichts steht.
+        onHint(Regex("^/([\\w:-]+) $").find(text)?.groupValues?.get(1)?.let { n ->
+            SlashCommands.all(project, workDir()).firstOrNull { it.name == n }?.hint?.takeIf { it.isNotBlank() }?.let { "/$n $it" }
+        })
+        Regex("^/([\\w:-]+) ([^\n]*)$").find(text)?.let { m ->
+            if (area.caretPosition != text.length) return@let
+            val cmd = m.groupValues[1]
+            val words = m.groupValues[2].split(' ')
+            val q = words.last()
+            val done = words.dropLast(1).filter { it.isNotEmpty() }
+            val hits = SlashArguments.values(project, cmd, done, q, workDir()) ?: return@let
             if (hits.isEmpty() || (hits.size == 1 && hits[0].name == q)) return hide()
-            argMode = m.groupValues[1]; slashAt = 0
+            argMode = cmd; argDone = done; slashAt = 0
+            current = if (done.isEmpty()) currentValue(cmd) else null
             model.clear(); hits.forEach(model::addElement)
             list.selectedIndex = 0
             if (!isVisible) show() else place()
@@ -287,7 +429,7 @@ class SlashCompletion(
             val open = openFiles().filter { typed.isEmpty() || it.name.contains(typed, ignoreCase = true) || it.description.contains(typed, ignoreCase = true) }
                 .sortedBy { if (it.name.startsWith(typed, ignoreCase = true)) 0 else 1 }
             // Ab zwei Buchstaben auch Dateien aus dem ganzen Projekt, unter den offenen.
-            val files = if (typed.length < 2) open else (open + projectFiles(typed)).distinctBy { it.source }
+            val files = if (typed.length < 2) open else (open + sessionFiles(typed)).distinctBy { it.source }
             if (files.isEmpty()) return hide()
             fileMode = true; slashAt = start
             model.clear(); files.forEach(model::addElement)
@@ -305,9 +447,21 @@ class SlashCompletion(
         if (typed.any { it.isWhitespace() || it == '/' }) return hide()
         if (start != dismissedAt) dismissedAt = -1 else return hide()
         slashAt = start
-        val all = SlashCommands.all(project)
+        val all = SlashCommands.all(project, workDir())
         val matches = all.filter { it.name.startsWith(typed, ignoreCase = true) } +
             all.filter { !it.name.startsWith(typed, ignoreCase = true) && it.name.contains(typed, ignoreCase = true) }
+        // Befehl ganz getippt ("/mcp" ohne Leerzeichen): gleich seine Werte zeigen - sonst schloss die Liste und Enter
+        // schickte den nackten Befehl (2026-11-18). Esc schließt die Liste, dann geht er ohne Wert raus.
+        if (start == 0 && caret == text.length && matches.any { it.name == typed }) {
+            SlashArguments.values(project, typed, emptyList(), "", workDir())?.takeIf { it.isNotEmpty() }?.let { hits ->
+                argMode = typed; argDone = emptyList(); slashAt = 0
+                current = currentValue(typed)
+                model.clear(); hits.forEach(model::addElement)
+                list.selectedIndex = 0
+                if (!isVisible) show() else place()
+                return
+            }
+        }
         if (matches.isEmpty() || (matches.size == 1 && matches[0].name == typed)) return hide()
         model.clear(); matches.forEach(model::addElement)
         list.selectedIndex = 0
@@ -366,7 +520,31 @@ class SlashCompletion(
      * Projektdateien, deren Name [typed] enthält (Namensindex, nur Projektinhalt): Treffer am Namensanfang zuerst, dann
      * kürzere Namen; höchstens 30. Während der Indizierung keine Treffer.
      */
-    private fun projectFiles(typed: String): List<SlashCommand> = runCatching {
+    /**
+     * Dateien für `@` aus dem Arbeitsordner der Session und seinen Unterordnern, Pfade relativ zu ihm (so versteht sie
+     * Claude Code). Liegt der Ordner im Projekt, über den Namensindex; außerhalb (Ordner-Session, PhpStorm Home, nach
+     * `/cd ..`) gibt es keinen Index - dann selbst suchen, flach und ohne Build-/Abhängigkeitsordner (2026-11-18).
+     */
+    private fun sessionFiles(typed: String): List<SlashCommand> {
+        val base = project.basePath?.trimEnd('/')
+        val dir = workDir()?.trimEnd('/') ?: base ?: return emptyList()
+        fun shown(path: String) = File(path).parent.orEmpty().let { p ->
+            if (p == dir) "." else if (p.startsWith("$dir/")) p.removePrefix("$dir/") else p.replaceFirst(System.getProperty("user.home"), "~")
+        }
+        if (base != null && (dir == base || dir.startsWith("$base/")))
+            return projectFiles(typed, 300).filter { it.source == dir || it.source.startsWith("$dir/") }.take(30).map { SlashCommand(it.name, shown(it.source), it.source) }
+        val skip = setOf("node_modules", ".git", "build", "dist", "out", "target", "vendor", ".gradle", ".idea", ".intellijPlatform", "__pycache__", ".venv")
+        val until = System.currentTimeMillis() + 300
+        return File(dir).walkTopDown().maxDepth(6)
+            .onEnter { it.path == dir || (it.name !in skip && !it.name.startsWith(".")) }
+            .takeWhile { System.currentTimeMillis() < until }
+            .filter { it.isFile && it.name.contains(typed, ignoreCase = true) }
+            .take(200).toList()
+            .sortedWith(compareBy({ if (it.name.startsWith(typed, ignoreCase = true)) 0 else 1 }, { it.name.length }))
+            .take(30).map { SlashCommand(it.name, shown(it.path), it.path) }
+    }
+
+    private fun projectFiles(typed: String, limit: Int = 30): List<SlashCommand> = runCatching {
         com.intellij.openapi.application.ApplicationManager.getApplication().runReadAction(com.intellij.openapi.util.Computable<List<SlashCommand>> {
             if (com.intellij.openapi.project.DumbService.isDumb(project)) return@Computable emptyList()
             val scope = com.intellij.psi.search.GlobalSearchScope.projectScope(project)
@@ -376,7 +554,7 @@ class SlashCompletion(
             names.sortedWith(compareBy({ if (it.startsWith(typed, ignoreCase = true)) 0 else 1 }, { it.length }, { it }))
                 .asSequence()
                 .flatMap { n -> com.intellij.psi.search.FilenameIndex.getVirtualFilesByName(n, scope).asSequence().filter { !it.isDirectory && it.isInLocalFileSystem } }
-                .take(30)
+                .take(limit)
                 .map { f ->
                     val dir = f.parent?.path.orEmpty()
                     SlashCommand(f.name, if (base != null && dir.startsWith(base)) dir.removePrefix(base).removePrefix("/").ifEmpty { "." } else dir, f.path)
@@ -394,7 +572,14 @@ class SlashCompletion(
         val c = list.selectedValue ?: return hide()
         hide()
         if (resumeMode) { area.text = "/resume " + c.name; area.caretPosition = area.text.length; return }
-        argMode?.let { area.text = "/$it " + c.name; area.caretPosition = area.text.length; return }
+        argMode?.let { cmd ->
+            // Ordner bleiben ohne Leerzeichen offen für den nächsten Unterordner.
+            val more = SlashArguments.continues(cmd, argDone)
+            area.text = "/$cmd " + (argDone + c.name).joinToString(" ") + (if (c.name.endsWith("/")) "" else " ")
+            area.caretPosition = area.text.length
+            if (more) later()
+            return
+        }
         if (fileMode) {
             val caret = area.caretPosition.coerceIn(slashAt, area.text.length)
             val insert = fileToken(c.source) + " "
@@ -407,7 +592,7 @@ class SlashCompletion(
         area.text = area.text.substring(0, slashAt) + insert + area.text.substring(caret).trimStart(' ')
         area.caretPosition = slashAt + insert.length
         // Gleich die Sessions zeigen.
-        if (c.name == "resume" || c.name in SlashArguments.values) later()
+        later()
     }
 }
 
@@ -416,8 +601,8 @@ class SlashCompletion(
  * gleich aus, Tab bzw. "Insert" setzt ihn an der Schreibmarke in den Prompt (z. B. um noch Argumente anzuhängen).
  */
 object SlashPicker {
-    fun show(project: Project, anchor: javax.swing.JComponent, run: (String) -> Unit, insert: (String) -> Unit) {
-        val all = SlashCommands.all(project)
+    fun show(project: Project, anchor: javax.swing.JComponent, run: (String) -> Unit, insert: (String) -> Unit, dir: String? = null) {
+        val all = SlashCommands.all(project, dir)
         val model = javax.swing.DefaultListModel<SlashCommand>().apply { all.forEach(::addElement) }
         val list = com.intellij.ui.components.JBList(model).apply {
             selectionMode = javax.swing.ListSelectionModel.SINGLE_SELECTION

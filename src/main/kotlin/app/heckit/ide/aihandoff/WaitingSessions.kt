@@ -385,21 +385,26 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         val byName = files.filter { it.isFile }.associateBy { it.name }
         val foreign = byName.values.filter { it.name.endsWith(".tab") }
             .filter { foreignTab(runCatching { it.readText().trim() }.getOrNull()) }.map { it.name.removeSuffix(".tab") }.toSet()
+        // Sessions in einem Terminal-Reiter dieses Projekts gehören dazu, auch wenn sie per /cd aus dem Projektordner
+        // gewechselt sind - sonst verlor der Session-Reiter seine Session ("Starting Claude…", 2026-11-18).
+        val own = byName.values.filter { it.name.endsWith(".tab") }
+            .filter { f -> runCatching { f.readText().trim() }.getOrNull()?.let { SessionTerminals.knows(project, it) } == true }
+            .map { it.name.removeSuffix(".tab") }.toSet()
 
         val newInfos = byName.values.filter { it.name.endsWith(".info") }.mapNotNull { f ->
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/')
-            if (!inProject(cwd)) return@mapNotNull null
             val id = f.name.removeSuffix(".info")
+            if (cwd == null || (!inProject(cwd) && id !in own)) return@mapNotNull null
             if (id in foreign) return@mapNotNull null
-            SessionInfo(id, f.lastModified(), cwd!!, o.str("transcript_path"), byName["$id.tab"]?.let { runCatching { it.readText().trim() }.getOrNull() })
+            SessionInfo(id, f.lastModified(), cwd, o.str("transcript_path"), byName["$id.tab"]?.let { runCatching { it.readText().trim() }.getOrNull() })
         }.associateBy { it.id }
 
         val found = byName.values.filter { it.name.endsWith(".json") }.mapNotNull { f ->
             val at = f.lastModified()
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/') ?: return@mapNotNull null
-            if (!inProject(cwd)) return@mapNotNull null
+            if (!inProject(cwd) && f.name.removeSuffix(".json") !in own) return@mapNotNull null
             if (f.name.removeSuffix(".json") in foreign) return@mapNotNull null
             val finished = o.str("hook_event_name") == "Stop"
             // Nach einer Freigabe im Terminal arbeitet Claude weiter, ohne dass ein Hook die Datei löscht: Das Protokoll
@@ -414,13 +419,13 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             if (id in waitingIds || id in foreign) return@mapNotNull null
             val o = read(f) ?: return@mapNotNull null
             val cwd = o.str("cwd")?.trimEnd('/')
-            if (!inProject(cwd)) return@mapNotNull null
+            if (cwd == null || (!inProject(cwd) && id !in own)) return@mapNotNull null
             // Abgebrochen (Esc): kein Stop-Hook, aber Claude Code schreibt "[Request interrupted by user…]" ins Protokoll.
             if (interrupted(o.str("transcript_path"), f.lastModified())) { f.delete(); sent.remove(id); return@mapNotNull null }
             // Sonst nach 30 Minuten ohne Bewegung im Protokoll nicht mehr zeigen.
             val last = maxOf(f.lastModified(), o.str("transcript_path")?.let { File(it).lastModified() } ?: 0L)
             if (now - last > 30 * 60_000L) return@mapNotNull null
-            WorkingSession(id, f.lastModified(), cwd!!, o.str("prompt").orEmpty())
+            WorkingSession(id, f.lastModified(), cwd, o.str("prompt").orEmpty())
         }
 
         // Lebenszeichen für den Frage-Hook: Ohne laufende IDE fragt Claude Code gleich im Terminal.

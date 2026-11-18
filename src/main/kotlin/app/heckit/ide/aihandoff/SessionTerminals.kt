@@ -39,6 +39,9 @@ object SessionTerminals {
     fun isOpen(project: Project, tab: String): Boolean = guard("isOpen") { bridge(project).isOpen(tab) } ?: false
 
     /** Irgendein von Handoff gestarteter Reiter offen (ohne EDT, nur für die Abfragehäufigkeit). */
+    /** Reiter [tab] hat Handoff in diesem Projekt gestartet (ohne EDT). */
+    fun knows(project: Project, tab: String): Boolean = available && project.getServiceIfCreated(TerminalBridge::class.java)?.knows(tab) == true
+
     fun anyOpen(project: Project): Boolean = available && project.getServiceIfCreated(TerminalBridge::class.java)?.hasTabs() == true
 
     /** Prompt schicken und abschicken (Enter). Zeilenumbrüche als Esc+Enter, damit Claude Code die Zeilen nicht einzeln abschickt. */
@@ -109,6 +112,7 @@ class TerminalBridge(private val project: Project) {
     private val tabs = ConcurrentHashMap<String, Any>()
 
     fun hasTabs() = tabs.isNotEmpty()
+    fun knows(id: String) = tabs.containsKey(id)
     fun owns(id: String) = tabs.containsKey(id)
 
     companion object {

@@ -69,6 +69,17 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.9.0</h3>
+            <ul>
+              <li>Slash list: values from the <code>argument-hint</code> of commands and skills (also your own, e.g.
+                  <code>[dev|staging|live]</code>), the current <code>/model</code> and <code>/effort</code> marked with a dot,
+                  <code>/mcp</code> with its actions and servers, <code>/help</code> with the commands, <code>/cd</code> and
+                  <code>/add-dir</code> with folders. A grey line shows what a command expects.</li>
+              <li>Commands, skills and <code>@</code> files come from the session's working folder (outside the project too).</li>
+              <li>Commands that open a dialog in the terminal (<code>/mcp</code>, <code>/config</code> …) bring the terminal to the front.</li>
+              <li>After <code>/cd</code> the header follows the new folder and the tab keeps its session and transcript.</li>
+              <li>Fixes: unknown commands no longer stay "Running…"; the view no longer jumps up when the Handoff window opens.</li>
+            </ul>
             <h3>1.8.1</h3>
             <ul>
               <li>After <code>/model </code> and <code>/effort </code> the slash list suggests their values; without a value they ask for
