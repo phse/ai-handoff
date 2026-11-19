@@ -44,6 +44,10 @@ If the MCP tools handoff_* are available, use them:
 - Questions with options for me (which variant, which findings to save): ask them
   with handoff_ask (options with a short description, multiSelect when several fit)
   instead of in the terminal, and wait with handoff_wait_for_result.
+- Steps I should try by hand (after a fix, before a release): hand them over with
+  handoff_checklist instead of a numbered list, and wait with handoff_wait_for_result.
+- Secrets (passwords, API tokens): never ask for them in the chat - let me type them
+  with handoff_request_secret, which writes them into the file without you seeing them.
 - Link what I should open, as Markdown links: files as [name](/abs/path:line),
   settings as [MCP Server](settings:MCP%20Server), IDE actions as
   [Find Action](action:GotoAction). The Handoff session tab opens them in the IDE.
@@ -122,6 +126,38 @@ Questions with options for me: ask them with handoff_ask instead of in the termi
 and wait with handoff_wait_for_result.
 ```
 
+### Checklists for manual tests
+
+Claude hands you the steps to try by hand as a card: each step with what should happen and a checkbox in front of it.
+Check the steps that work. The speech bubble on the right opens a note for a step, e.g. what happened instead.
+**Send Results** sends all steps at once: unchecked steps with a note as failed, without a note as "not done",
+plus an optional note for the whole test.
+
+**Tools:** `handoff_checklist`, `handoff_wait_for_result`.
+
+**Prompt for your CLAUDE.md:**
+
+```
+Steps I should try by hand: hand them over with handoff_checklist instead of a
+numbered list, and wait with handoff_wait_for_result.
+```
+
+### Secrets
+
+When a password or token is needed, Claude asks for it as a card with a password field and the target file (and key).
+**Save** writes the value into the file - as a line `KEY=value` (replaced or added; for `.env`, `.properties`,
+`gradle.properties`) or as the whole file. Claude only learns that it is set, and whether the file is ignored by git.
+New files are readable only by you.
+
+**Tools:** `handoff_request_secret`, `handoff_wait_for_result`.
+
+**Prompt for your CLAUDE.md:**
+
+```
+Secrets (passwords, API tokens): never ask for them in the chat - let me type them
+with handoff_request_secret, which writes them into the file without you seeing them.
+```
+
 ### Images to review or choose from
 
 One image to approve, or several variants to pick one; **Approve All** approves all of them at once when they are
@@ -157,11 +193,13 @@ its line number. The **+** also appears in normal editors while a review is wait
 (or at any other time) use **Add Note for Claude…** in the context menu. Notes show up as an icon in the
 gutter and as grey text at the end of the line; click the icon to edit or delete one. Then **Approve**, or
 **Send Notes**: Claude gets each note with path, line and the line of code it belongs to. Sent notes are removed.
-The **+** also works in a one-sided diff (new or deleted file); one note per line, a click on the **+** opens it.
+The **+** also works in a one-sided diff (new or deleted file); one note per line, a click on the **+** opens it. On a
+deleted line of the one-sided diff, the note goes to the line where the deletion is and takes the deleted code along.
 
 You can also leave notes without a review. They wait in a card in the Commands tab until you tell Claude to read them
 (or until the next review), or send them yourself with **Send to Claude…** on that card: pick a running session or start
-a new one. Notes are kept in memory only and are gone after an IDE restart.
+a new one. Notes stay after an IDE restart or a Handoff update (they are saved with the project's workspace); if the
+file changed meanwhile, a note looks for its line nearby.
 
 **Tools:** `handoff_request_review`, `handoff_get_notes`, `handoff_wait_for_result`.
 
@@ -279,24 +317,38 @@ in a terminal tab in the background and opens the session in an editor tab:
   filters. From two typed letters on, matching files from the session's working folder and below follow the open ones. This works in projects only, not in the IDE's home/welcome project. The chosen file shows short as *[@name.md #1]* and goes to Claude as an `@path` mention, so Claude reads it.
   Use it to give a file as context on purpose.
 - Drop image files onto the prompt field, or paste a screenshot (⌘V): the field shows them short as *[Image #1]* (other
-  files as *[File #2: name]*), Claude gets the file path and reads the image. A short name acts like one character:
+  files as *[File #2: name]*). The same goes for pasting a copied path (e.g. **Copy Absolute Path**, or ⌥⌘C in Finder) as long as
+  the pasted text is nothing but paths of existing files; Claude gets the file path and reads the image. A short name acts like one character:
   Backspace removes it whole, the cursor skips over it, and hovering it shows the path (and a preview for images). Pasted images are saved to `~/.claude/handoff/images/`. **Mark Areas in Image…** (below the field) opens the image viewer:
   draw frames with a note each, and the prompt gets them as pixel areas with the notes. Opening it again shows the frames
   from the prompt, and saving replaces them. Drawings go in as a short *[Drawing #2]* that stands for the copy with your
   drawing.
 - Waiting Handoff cards (commands to run, questions, reviews, images) show at the end of the conversation too, so you
   can answer there without switching to the tool window. While a session tab is in front, new cards do not pop up
-  the tool window.
+  the tool window. A card shows in the tab of the session that sent it: a hook tells Handoff which session calls a
+  handoff tool (sessions started before the hooks were updated still get a guess by working folder).
 - Session tabs open again after an IDE restart. If the session no longer runs in the IDE terminal, **Resume** (next to
   the prompt field, or **Resume in Terminal** at the top) continues it (`claude --resume`) in a new terminal tab.
+- A file you open from a link in the conversation and close again takes you back to the session tab (the IDE's own
+  history leaves session tabs out).
+- **↶** next to the time of a prompt goes back to before it, like `/rewind`: **Code and Conversation**, **Conversation
+  Only** or **Code Only**. Code: the files Claude changed from there on get their earlier content back. Conversation:
+  Claude forgets this prompt and everything after it, and the prompt goes back into the field to edit. Works when Claude
+  is done and the session runs in the IDE terminal; Handoff ends Claude Code there and resumes it at that point.
 - While Claude works: **Interrupt (Esc)**. When Claude asks for a permission: **Yes**, **Yes, Don't Ask Again** and
   **No** (the keys 1, 2 and Esc in the terminal). **Show Terminal** brings up the terminal tab for anything else.
 
-In a running Claude Code session, type `/show-in-editor`: the IDE opens the session's editor tab (or brings it to the
+**Open in Handoff** in the context menu of a terminal tab where Claude Code runs opens its session in an editor tab,
+and the tab takes over that terminal (prompts, slash commands, buttons). Handoff finds the session through Claude's process.
+
+In a running Claude Code session, you can also type `/show-in-editor`: the IDE opens the session's editor tab (or brings it to the
 front). The hook catches the command, so Claude never sees it. If the session runs in the IDE's terminal, the tab
 takes it over like one started from Handoff (prompts, slash commands, buttons). For sessions in other terminals the tab
 shows the conversation; prompts reach Claude only while it is done ("Claude is done"), and slash commands only through the
-terminal. The "done", "waiting" and "working" cards have **Open in Editor**.
+terminal. The "done", "waiting" and "working" cards have **Open in Editor**. While Claude works, prefer **Open in
+Handoff** or **Open in Editor**: a command typed in the terminal makes Claude Code move a running shell command to the
+background, and Claude stops until it finishes. After Handoff was updated without restarting the IDE, its session tabs
+find their terminal tabs again by themselves.
 
 This needs the hooks from **Show When Claude Is Waiting** (Handoff offers to set them up) and the IDE's terminal
 (2026.1 or later). Handoff marks its terminal tabs with the environment variable `HANDOFF_TAB`, so it knows which

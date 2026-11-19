@@ -94,7 +94,9 @@ class SessionEditorProvider : FileEditorProvider, DumbAware {
 /** Symbol des Session-Reiters: Spinner, solange Claude arbeitet, sonst das Handoff-Symbol. */
 class SessionIconProvider : com.intellij.ide.FileIconProvider {
     override fun getIcon(file: VirtualFile, flags: Int, project: Project?): Icon? =
-        (file as? SessionFile)?.let { if (it.busy) HandoffSpinner.icon else HandoffIcons.editor() }
+        // Spinner nur im Reiter: Reiter fragen mit ICON_FLAG_READ_STATUS (EditorsSplitters), die Navigationsleiste mit 0
+        // (PsiNavBarItem.getIcon) - und frischt ihr Symbol nicht auf, der Spinner blieb dort stehen (2026-11-18).
+        (file as? SessionFile)?.let { if (it.busy && flags and com.intellij.openapi.util.Iconable.ICON_FLAG_READ_STATUS != 0) HandoffSpinner.icon else HandoffIcons.editor() }
 }
 
 /**
@@ -202,6 +204,18 @@ object SessionEditors {
         val open = openTab(project, tab, sessionId)
         OpenFileDescriptor(project, open ?: SessionFile(tab, sessionId, restoredCwd = cwd)).navigate(focus)
         if (focus) com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
+    }
+
+    /**
+     * Session im Reiter zeigen, der den Terminal-Reiter [tab] bedient. Ein schon offener Reiter der Session ohne dieses
+     * Terminal (vorher nur das Protokoll, oder Terminal nach Plugin-Update vergessen) wird ersetzt - [SessionFile.tab] ist fest.
+     */
+    fun openWithTerminal(project: Project, tab: String, sessionId: String) {
+        val fem = FileEditorManager.getInstance(project)
+        fem.openFiles.filterIsInstance<SessionFile>()
+            .filter { f -> f.tab != tab && !f.logOnly && (f.sessionId == sessionId || f.currentSession(project) == sessionId) }
+            .forEach { fem.closeFile(it) }
+        open(project, tab, sessionId, focus = true)
     }
 
     private val startDirs = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -389,6 +403,8 @@ private class ImageDropHandler(private val delegate: javax.swing.TransferHandler
                     val img = support.transferable.getTransferData(image) as java.awt.Image
                     listOf(savePng(img).absolutePath)
                 }
+                support.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor) ->
+                    pathsIn(support.transferable.getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor) as String)
                 else -> emptyList()
             }
         }.getOrDefault(emptyList())
@@ -398,6 +414,22 @@ private class ImageDropHandler(private val delegate: javax.swing.TransferHandler
         val before = area.text.getOrNull(pos - 1)
         area.document.insertString(pos, (if (before != null && !before.isWhitespace()) " " else "") + text + " ", null)
         return true
+    }
+
+    /**
+     * Eingefügter Text, der nur aus Pfaden vorhandener Dateien besteht (z. B. Finder ⌥⌘C, Copy Absolute Path, auch mehrere
+     * Zeilen, mit Anführungszeichen oder `\ ` vor Leerzeichen), wird wie eine gezogene Datei zur Marke. Steht noch anderer Text
+     * dabei, bleibt alles Text.
+     */
+    private fun pathsIn(text: String): List<String> {
+        val lines = text.trim().lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty() || lines.size > 20) return emptyList()
+        val paths = lines.map { line ->
+            val unquoted = if (line.length > 1 && (line[0] == '"' || line[0] == '\'') && line.last() == line[0]) line.substring(1, line.length - 1)
+                else line.replace("\\ ", " ")
+            if (unquoted.startsWith("~/")) System.getProperty("user.home") + unquoted.substring(1) else unquoted
+        }
+        return if (paths.all { it.startsWith("/") && File(it).exists() }) paths.map { File(it).absolutePath } else emptyList()
     }
 
     private fun savePng(img: java.awt.Image): File {
@@ -599,6 +631,8 @@ class TranscriptEntry(val kind: Kind, val text: String, val path: String? = null
     @Volatile var error: String? = null
     /** USER: Zeitpunkt (ms) aus dem Protokoll. */
     @Volatile var time: Long? = null
+    /** USER: Kennung der Nutzer-Nachricht im Protokoll (nur echte Prompts, nicht eingereihte) - Ziel für „Rewind“. */
+    @Volatile var uuid: String? = null
     /** TOOL: ganzer Aufruf und Ergebnis, zum Aufklappen. */
     @Volatile var detail: String? = null
     @Volatile var output: String? = null
@@ -610,6 +644,19 @@ class TranscriptEntry(val kind: Kind, val text: String, val path: String? = null
      * mitgeschickt hat - [path]/[line] als Link.
      */
     enum class Kind { USER, ASSISTANT, TOOL, NOTE, SUMMARY, INFO, DIVIDER, FILE, IMAGE }
+}
+
+/**
+ * Einträge, die ein Rewind aus Handoff verworfen hat, je Session (`~/.claude/handoff/rewound/<id>`): Claude Code lässt sie
+ * im Protokoll stehen und setzt die Unterhaltung an einer früheren Nachricht fort.
+ */
+object Rewinds {
+    private val dir = File(System.getProperty("user.home"), ".claude/handoff/rewound")
+    fun load(sessionId: String): Set<String> = runCatching { File(dir, sessionId).readLines().filter { it.isNotBlank() }.toSet() }.getOrDefault(emptySet())
+    fun add(sessionId: String, uuids: List<String>) {
+        if (uuids.isEmpty()) return
+        runCatching { dir.mkdirs(); File(dir, sessionId).appendText(uuids.joinToString("\n", postfix = "\n")) }
+    }
 }
 
 /**
@@ -632,13 +679,38 @@ class Transcript(val path: String) {
     val background = linkedMapOf<String, String>()
     private val toolLines = HashMap<String, String>()
     private val toolEntries = HashMap<String, TranscriptEntry>()
+    /**
+     * Für „Rewind“: Einträge in Dateireihenfolge, ihre Eltern und welche davon Nachrichten (user/assistant) sind. Nach einem
+     * Rewind setzt Claude Code die Unterhaltung an einer früheren Nachricht fort - die verworfenen Einträge bleiben in der
+     * Datei stehen ([Rewinds] merkt sie sich, sie werden übersprungen).
+     */
+    private val order = ArrayList<String>()
+    private val parents = HashMap<String, String?>()
+    private val messages = HashSet<String>()
+    private val discarded: MutableSet<String> = Rewinds.load(File(path).nameWithoutExtension).toMutableSet()
+
+    /** Nachricht, bei der die Unterhaltung vor dem Prompt [promptUuid] weitergeht - null beim ersten Prompt. */
+    fun resumeTarget(promptUuid: String): String? {
+        var p = parents[promptUuid]
+        while (p != null && p !in messages) p = parents[p]
+        return p
+    }
+
+    /** Ab [uuid] (ausschließlich) gelesene Einträge verwerfen und das Protokoll neu einlesen. */
+    @Synchronized fun discardAfter(uuid: String) {
+        val i = order.indexOf(uuid).takeIf { it >= 0 } ?: return
+        val gone = order.subList(i + 1, order.size).toList()
+        Rewinds.add(File(path).nameWithoutExtension, gone)
+        discarded += gone
+        offset = 0; entries.clear(); background.clear(); toolLines.clear(); toolEntries.clear(); order.clear(); parents.clear(); messages.clear()
+    }
 
     /** Neue Zeilen einlesen; true, wenn sich etwas geändert hat. */
-    fun update(): Boolean {
+    @Synchronized fun update(): Boolean {
         val file = File(path)
         if (!file.isFile) return false
         val length = file.length()
-        if (length < offset) { offset = 0; entries.clear(); background.clear(); toolLines.clear(); toolEntries.clear() }
+        if (length < offset) { offset = 0; entries.clear(); background.clear(); toolLines.clear(); toolEntries.clear(); order.clear(); parents.clear(); messages.clear() }
         if (length == offset) return false
         val bytes = RandomAccessFile(file, "r").use { raf ->
             raf.seek(offset)
@@ -655,7 +727,15 @@ class Transcript(val path: String) {
     private fun JsonObject.str(k: String) = get(k)?.takeIf { it.isJsonPrimitive }?.asString
 
     private fun parse(o: JsonObject) {
-        if (o.get("isSidechain")?.asBoolean == true || o.get("isMeta")?.asBoolean == true) return
+        if (o.get("isSidechain")?.asBoolean == true) return
+        val uuid = o.str("uuid")
+        if (uuid != null) {
+            if (uuid in discarded) return
+            order += uuid
+            parents[uuid] = o.str("parentUuid")
+            if (o.str("type") == "user" || o.str("type") == "assistant") messages += uuid
+        }
+        if (o.get("isMeta")?.asBoolean == true) return
         when (o.str("type")) {
             "ai-title" -> if (!customTitle) title = o.str("aiTitle") ?: title
             "custom-title" -> o.str("customTitle")?.takeIf { it.isNotBlank() }?.let { title = it; customTitle = true }
@@ -705,7 +785,7 @@ class Transcript(val path: String) {
                 val text = texts(content).joinToString("\n").trim()
                 // Zusammenfassung nach /compact: steht als Nutzer-Nachricht im Protokoll, wird eingeklappt gezeigt.
                 if (o.get("isCompactSummary")?.asBoolean == true) { if (text.isNotEmpty()) entries += TranscriptEntry(TranscriptEntry.Kind.SUMMARY, text); return }
-                userText(text)?.let { it.time = time(o); entries += it }
+                userText(text)?.let { it.time = time(o); if (it.kind == TranscriptEntry.Kind.USER) it.uuid = uuid; entries += it }
                 images(content)
             }
             "assistant" -> {
@@ -816,6 +896,7 @@ class Transcript(val path: String) {
     private companion object {
         val IMAGE_DIR = File(System.getProperty("java.io.tmpdir"), "handoff-images")
         val TASK_DONE = Regex("<task-notification>\\s*<task-id>([^<]+)</task-id>")
+        private val FROM_IDE = Regex("(?s)The user sent this follow-up prompt from the IDE \\(Handoff tool window\\):\\s*(.*?)\\s*(?:</system-reminder>|$)")
     }
 
     private fun texts(content: JsonElement): List<String> = when {
@@ -844,8 +925,12 @@ class Transcript(val path: String) {
             val out = m.groupValues[1].replace(Regex("\u001B\\[[0-9;]*m"), "").replace(Regex("\\s*\\(ctrl\\+o[^)]*\\)"), "").trim()
             return if (out.isEmpty()) null else TranscriptEntry(TranscriptEntry.Kind.NOTE, out)
         }
+        // Prompt aus der IDE über den wartenden Stop-Hook: Claude Code 2.1.327 schreibt ihn als <task-notification> mit
+        // "Stop hook blocking error from command "Stop": The user sent …" in einem <system-reminder>. Ohne diesen Zweig fehlte
+        // die Sprechblase im Verlauf und blieb als "Running…" unten kleben, obwohl Claude längst geantwortet hatte (2026-11-19).
+        FROM_IDE.find(text)?.let { m -> return m.groupValues[1].trim().takeIf { it.isNotEmpty() }?.let { TranscriptEntry(TranscriptEntry.Kind.USER, it) } }
         if (text.startsWith("<")) return null
-        return TranscriptEntry(TranscriptEntry.Kind.USER, text.removePrefix("The user sent this follow-up prompt from the IDE (Handoff tool window):").trim())
+        return TranscriptEntry(TranscriptEntry.Kind.USER, text)
     }
 
     /** Werkzeugaufruf für die Freigabe: Name und der ganze Befehl (bzw. Datei, Adresse …), nicht gekürzt. */
@@ -927,6 +1012,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 else hint.text = "Slash commands only reach sessions started here (New Claude Session)."
                 return@addHyperlinkListener
             }
+            if (link.startsWith(REWIND_LINK)) { rewind(link.removePrefix(REWIND_LINK)); return@addHyperlinkListener }
             if (link.startsWith(PROMPT_LINK)) {
                 input.text = java.net.URLDecoder.decode(link.removePrefix(PROMPT_LINK), Charsets.UTF_8)
                 input.requestFocusInWindow(); input.caretPosition = input.document.length
@@ -950,6 +1036,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 val tip = when {
                     href?.startsWith(RUN_LINK) == true -> "Run now"
                     href?.startsWith(PROMPT_LINK) == true -> "Use as prompt"
+                    href?.startsWith(REWIND_LINK) == true -> "Rewind to before this prompt…"
                     else -> null
                 }
                 if (tip != toolTipText) toolTipText = tip
@@ -961,7 +1048,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             override fun mouseReleased(e: java.awt.event.MouseEvent) = popup(e)
             private fun popup(e: java.awt.event.MouseEvent) {
                 if (!e.isPopupTrigger) return
-                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) || it.startsWith(TOOL_LINK) || it == MORE_LINK || it.startsWith(PROMPT_LINK) || it.startsWith(RUN_LINK) } ?: return
+                val href = linkAt(e.point)?.takeUnless { it.startsWith(STEPS_LINK) || it.startsWith(TOOL_LINK) || it == MORE_LINK || it.startsWith(PROMPT_LINK) || it.startsWith(RUN_LINK) || it.startsWith(REWIND_LINK) } ?: return
                 com.intellij.openapi.actionSystem.ActionManager.getInstance()
                     .createActionPopupMenu("HandoffSession", SessionLinks.menu(project, href, baseDir())).component.show(this@apply, e.x, e.y)
                 e.consume()
@@ -1116,7 +1203,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
         status.text?.takeIf { it.isNotBlank() }?.let { lines += it }
         currentDir()?.let { lines += it }
         lines += limitTips
-        val tip = lines.joinToString("<br>") { StringUtil.escapeXmlEntities(it) }.takeIf { it.isNotEmpty() }?.let { "<html>$it</html>" }
+        // <nobr>: Der Tooltip der IDE bricht HTML sonst schon bei rund 250 px um - Pfad und Rücksetzzeit rissen mitten
+        // durch ("Do. 00:" / "20", 2026-11-18).
+        val tip = lines.joinToString("<br>") { "<nobr>${StringUtil.escapeXmlEntities(it)}</nobr>" }.takeIf { it.isNotEmpty() }?.let { "<html>$it</html>" }
         if (status.toolTipText != tip) status.toolTipText = tip
         if (limits.toolTipText != tip) limits.toolTipText = tip
         val dirTip = tip?.replace("</html>", "<br><br>Click to reveal the folder</html>")
@@ -1239,6 +1328,17 @@ private class SessionEditor(private val project: Project, private val file: Sess
             }
         })
         transferHandler = ImageDropHandler(transferHandler) { path -> attach(path) }
+        // ⌘V erreicht den TransferHandler nicht: Die Editor-Aktion $Paste (TextComponentEditorAction) fügt auch in Swing-Textfelder
+        // ein, über EditorCopyPasteHelper - eingefügte Pfade blieben Text (2026-11-19, per Log belegt). Eigene Aktion am Feld
+        // geht vor und reicht die Zwischenablage an den Handler; ohne Dateien/Bild fügt er wie gewohnt Text ein.
+        val field = this
+        object : com.intellij.openapi.project.DumbAwareAction() {
+            override fun actionPerformed(e: com.intellij.openapi.actionSystem.AnActionEvent) {
+                val contents = com.intellij.openapi.ide.CopyPasteManager.getInstance().contents ?: return
+                field.transferHandler.importData(javax.swing.TransferHandler.TransferSupport(field, contents))
+            }
+        }.registerCustomShortcutSet(com.intellij.openapi.actionSystem.ActionManager.getInstance()
+            .getAction(com.intellij.openapi.actionSystem.IdeActions.ACTION_PASTE).shortcutSet, this)
         addMouseListener(object : java.awt.event.MouseAdapter() {
             override fun mousePressed(e: java.awt.event.MouseEvent) { if (watchKeys) SwingUtilities.invokeLater { logInputState("clicked") } }
         })
@@ -1483,6 +1583,63 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private fun showDialogTerminal(tab: String) {
         SessionTerminals.show(project, tab)
         hint.text = "This command opens a dialog in the terminal - use it there, Esc closes it."
+    }
+
+    /**
+     * Zurück vor einen Prompt, wie `/rewind` in Claude Code, aber ohne dessen Auswahl im Terminal: Claude Code beenden
+     * (`/exit`), dann in derselben Shell `claude --resume <id> --rewind-files <prompt>` (Dateien auf den Stand vor dem Prompt)
+     * und/oder `claude --resume <id> --resume-session-at <vorige Nachricht>` (Unterhaltung ab dort). Beide Schalter nutzt
+     * das Agent SDK (`rewindFiles`, `resumeSessionAt`); in `claude --help` stehen sie nicht (2.1.327 per Testsession
+     * geprüft, 2026-11-19). Der Prompt landet danach im Eingabefeld.
+     */
+    private fun rewind(promptUuid: String) {
+        val t = transcript ?: return
+        val id = sessionId ?: return
+        val tab = file.tab
+        if (tab == null || !terminalOpen) { hint.text = "Rewind needs the session in the IDE terminal (New Claude Session, or Open in Handoff in the terminal's menu)."; return }
+        if (file.busy) { hint.text = "Rewind works when Claude is done - wait, or interrupt with Esc."; return }
+        val prompt = t.entries.firstOrNull { it.uuid == promptUuid }?.text.orEmpty()
+        val target = t.resumeTarget(promptUuid)
+        val options = if (target != null) arrayOf("Code and Conversation", "Conversation Only", "Code Only", "Cancel") else arrayOf("Code Only", "Cancel")
+        val dialog = RewindDialog(project, prompt, options.filter { it != "Cancel" }, first = target == null)
+        if (!dialog.showAndGet()) return
+        val label = dialog.chosen ?: return
+        val code = label.startsWith("Code")
+        val conversation = label != "Code Only" && label != "Cancel"
+        if (!code && !conversation) return
+        val cmd = listOfNotNull(
+            if (code) "claude --resume $id --rewind-files $promptUuid" else null,
+            if (conversation) "claude --resume $id --resume-session-at $target" else "claude --resume $id",
+        ).joinToString(" && ")
+        hint.text = "Rewinding…"
+        // Prozess vor dem /exit merken: Der Hook schreibt .pid bei jedem Ereignis neu, SessionEnd löscht sie.
+        val pid = WaitingSessions.getInstance(project).infos[id]?.pid ?: File(WaitingHook.waiting, "$id.pid").takeIf { it.isFile }
+            ?.let { runCatching { it.readText().trim().toLong() }.getOrNull() }
+        if (!SessionTerminals.send(project, tab, "/exit")) { hint.text = "Could not reach the terminal."; return }
+        // Erst wenn der Claude-Prozess beendet ist, liest wieder die Shell - sonst ginge der Befehl als Prompt an Claude.
+        // Das Verschwinden der Hook-Daten (SessionEnd) allein reichte nicht: In der Sandbox landete der Befehl am 2026-11-19
+        // trotzdem im Eingabefeld von Claude. Ohne bekannten Prozess bleibt es bei SessionEnd, dazu eine Pause für die Shell.
+        val info = File(WaitingHook.waiting, "$id.info")
+        fun running() = if (pid != null) ProcessHandle.of(pid).map { it.isAlive }.orElse(false) else info.exists()
+        val until = System.currentTimeMillis() + 15_000
+        var goneAt = 0L
+        javax.swing.Timer(300, null).apply {
+            addActionListener {
+                val now = System.currentTimeMillis()
+                if (running()) { if (now < until) return@addActionListener }
+                else { if (goneAt == 0L) goneAt = now; if (now - goneAt < 700) return@addActionListener }
+                stop()
+                if (running()) { hint.text = "Claude Code did not exit - rewind cancelled. Try /exit in the terminal."; return@addActionListener }
+                SessionTerminals.send(project, tab, cmd)
+                if (conversation && target != null) {
+                    t.discardAfter(target)
+                    input.text = prompt; input.caretPosition = input.document.length
+                }
+                hint.text = when { code && conversation -> "Code and conversation went back."; code -> "Code went back."; else -> "Conversation went back." }
+                renderTranscript(force = true)
+            }
+            start()
+        }
     }
 
     private fun runCommand(cmd: String) {
@@ -1869,8 +2026,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 val t = timeHtml(e.time)
                 html.append("<div class=\"user\">")
                 if (t.isEmpty()) html.append(prompt)
-                else html.append("<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"prompt\" valign=\"top\">").append(prompt)
-                    .append("</td><td class=\"time\" align=\"right\" valign=\"top\" nowrap>").append(t).append("</td></tr></table>")
+                else {
+                    // ↶ vor der Uhrzeit: zurück vor diesen Prompt (nur in Sessions im Terminal der IDE, siehe [rewind]).
+                    val back = e.uuid?.takeIf { file.tab != null && !file.logOnly }?.let { "<a href=\"$REWIND_LINK$it\">↶</a>&nbsp;&nbsp;" }.orEmpty()
+                    html.append("<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"prompt\" valign=\"top\">").append(prompt)
+                        .append("</td><td class=\"time\" align=\"right\" valign=\"top\" nowrap>").append(back).append(t).append("</td></tr></table>")
+                }
                 html.append("</div>")
             }
             TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(promptLinks(Md.document(e.text)), baseDir()))
@@ -2053,7 +2214,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
         status.text = if (tasks > 0 && working == null && !wasSent) "$text · $tasks background task${if (tasks > 1) "s" else ""} running" else text
         updateHeaderTip()
         status.foreground = color
-        val isBusy = working != null || wasSent
+        // Fertig/wartend geht vor: Ein noch gemerktes "gesendet" ließ den Spinner im Reiter und in der Navigationsleiste
+        // (dort als Strich) weiterlaufen, obwohl die Kopfzeile "Claude is done" zeigte (2026-11-18).
+        val isBusy = waiting == null && (working != null || wasSent)
         if (file.busy != isBusy) { file.busy = isBusy; updateTabTitle() }
         if (busy.isVisible != isBusy) { busy.isVisible = isBusy; conversation.revalidate(); if (isBusy) scrollToEnd() }
 
@@ -2130,6 +2293,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             argHint != null -> argHint!!
             terminal -> "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
+            resumable && tab != null -> "Terminal tab not found. Still running there? Type /show-in-editor in it. Otherwise Resume (claude --resume)."
             resumable -> "Not running in the IDE terminal. Resume continues it there (claude --resume); only if it is not still open elsewhere."
             id == null && tab == null -> "Session not found."
             else -> "Send when Claude is done, or type in the terminal."
@@ -2193,6 +2357,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         private const val MORE_LINK = "handoff-more"
         private const val PROMPT_LINK = "handoff-prompt:"
         private const val RUN_LINK = "handoff-run:"
+        private const val REWIND_LINK = "handoff-rewind:"
         private val PRE = Regex("(<pre[^>]*>)(.*?)</pre>", RegexOption.DOT_MATCHES_ALL)
         private val SLASH = Regex("""/([\w:.-]+)(?=\s|$)""")
         private val PARAGRAPH = Regex("<p>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
@@ -2293,4 +2458,39 @@ private object BUBBLE : com.intellij.util.ui.ExtendableHTMLViewFactory.Extension
                 (attributes.getAttribute(k)?.toString()?.removeSuffix("px")?.toFloatOrNull() ?: 0f)
         }
     else view
+}
+
+/**
+ * Rückfrage zum Rewind. Eigener Dialog statt Messages: Dessen AlertDialog scrollt den Text ab etwa sieben Zeilen bzw.
+ * 330 Zeichen (`wrapToScrollPaneIfNeeded`, Schriftgröße × 9,45 px), und die Erklärung war nur per Scrollen lesbar (2026-11-19).
+ */
+private class RewindDialog(project: Project, private val prompt: String, private val options: List<String>, private val first: Boolean) :
+    com.intellij.openapi.ui.DialogWrapper(project) {
+    var chosen: String? = null
+
+    init {
+        title = "Rewind"
+        init()
+    }
+
+    override fun createCenterPanel(): JComponent {
+        val esc = { t: String -> StringUtil.escapeXmlEntities(t) }
+        val quoted = esc(StringUtil.shortenTextWithEllipsis(prompt.replace('\n', ' '), 160, 0))
+        val html = "<html><div style='width:${JBUI.scale(420)}px'>Go back to before this prompt?<br><br><i>\"$quoted\"</i><br><br>" +
+            "<b>Code:</b> files Claude changed from here on go back to their state before the prompt (your own edits in between are lost).<br><br>" +
+            "<b>Conversation:</b> Claude forgets this prompt and everything after it; the prompt goes back into the input field." +
+            (if (first) "<br><br>This is the first prompt, so only the code can go back." else "") + "</div></html>"
+        return JBLabel(html, com.intellij.openapi.ui.Messages.getQuestionIcon(), JBLabel.LEFT).apply {
+            verticalTextPosition = JBLabel.TOP
+            verticalAlignment = JBLabel.TOP
+            iconTextGap = JBUI.scale(12)
+        }
+    }
+
+    override fun createActions(): Array<javax.swing.Action> = options.mapIndexed { i, label ->
+        object : DialogWrapperAction(label) {
+            init { if (i == 0) putValue(DEFAULT_ACTION, true) }
+            override fun doAction(e: java.awt.event.ActionEvent?) { chosen = label; close(OK_EXIT_CODE) }
+        }
+    }.toTypedArray<javax.swing.Action>() + cancelAction
 }

@@ -24,13 +24,13 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   opens their diff. Hover a line in the diff (or, while a review is waiting, in the editor) and click the **+** next to its line number, or use **Add Note for
   Claude…** in the context menu of the diff or editor (select several lines for a range); the note shows as a gutter icon and grey text at the end of the line. **Approve**, or **Send Notes**: Claude
   gets each note with path, line and the line of code. Notes left without a review wait in a card until Claude
-  fetches them. Notes are kept in memory only.
+  fetches them. Notes are saved with the project (they survive a restart) and can sit on deleted lines in the diff.
 - **Command sequences**: several commands as one card (verify, tag, push, upload). **Run All** runs them one after
   another and stops at the first one that fails, **Run Step n** runs only the next one; each command can be edited.
   Claude gets exit code and output per step.
 - **Claude is waiting** (optional, **Show When Claude Is Waiting** in the tool window's ⋮ menu): a card and a
   notification when a Claude Code session in the project is done or needs your input. Handoff creates
-  `~/.claude/handoff/hook.sh` and adds it as a hook for Stop, Notification, UserPromptSubmit and SessionEnd in
+  `~/.claude/handoff/hook.sh` and adds it as a hook for SessionStart, Stop, Notification, UserPromptSubmit, PreToolUse (questions and Handoff tool calls) and SessionEnd in
   `~/.claude/settings.json` (backup `settings.json.bak-handoff`, existing hooks stay); switching it off removes them.
   The "done" card shows the start of the message formatted, opens the full message in an editor tab and has a field
   for the next prompt, which goes straight to that session (the Stop hook waits for it in the background, `asyncRewake`).
@@ -42,12 +42,19 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   terminal as typed (slash commands with suggestions included), buttons for permission questions, a spinner while Claude
   works, clickable links (files, folders, web pages, settings, IDE actions), images by drag and drop or paste with marked
   areas, Handoff cards and plan limits in the tab, and **Resume** after a restart. `/show-in-editor` opens a running
-  session there. Uses the IDE's terminal API, which JetBrains marks as experimental.
+  session there, and **Open in Handoff** in the terminal's context menu shows the session running in that tab. **↶** next to
+  a prompt rewinds to before it: code, conversation or both (`claude --resume … --rewind-files` / `--resume-session-at`).
+  Pasted file paths become short tokens like dropped files. Uses the IDE's terminal API, which JetBrains marks as experimental.
 - **Session logs (.jsonl)**: Claude Code's transcripts (`~/.claude/projects/…`, or any `.jsonl` with a `sessionId`) open as
   a readable conversation instead of raw JSON, with tool steps, errors and changed files; **Text** at the bottom shows the
   file itself. **Resume in New Tab** continues the session, **Export Session as Markdown…** saves it.
 - **Questions with options**: Claude asks one or more questions as a card (Back/Next), one answer or several
   (`multiSelect`) per question, each option with a short description, plus a field for an own answer.
+- **Checklists for manual tests**: the steps to try by hand as a card, each with what should happen, a checkbox and a
+  speech bubble for a note. **Send Results** returns passed, failed (unchecked with a note) and not done per step.
+- **Secrets**: Claude asks for a password or token; you type it into a card and Handoff writes it into the file
+  (`KEY=value` in a `.env`, or the whole file), new files with mode 600. Claude only learns that it is set, and gets a
+  warning if Git does not ignore the file.
 - **Handoff Tools**: calls per tool; per tool a switch for the CLAUDE.md instruction (Claude edits the file on request)
   and one for the permission (`permissions.deny` in `~/.claude/settings.json`).
 - **Notifications**: a system notification and a mark on the dock or taskbar icon when something is waiting while the
@@ -76,6 +83,8 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 | `handoff_request_review` | `summary` (one or two sentences) | an `id` at once; reviews the changelist of the current or last task, otherwise all local changes |
 | `handoff_get_notes` | – | the open line notes (`path:line`, note, line of code) and removes them; `No open notes.` |
 | `handoff_ask` | `questions` (list of `{question` (Markdown), `options` (list of `{label, description}`), `multiSelect}`), `title` (optional) | an `id` at once; one card, several questions with Back/Next, radio buttons or checkboxes and a field for an own answer per question |
+| `handoff_checklist` | `items` (list of `{step` (Markdown), `expected` (optional)`}`), `title` (optional) | an `id` at once; `handoff_wait_for_result` returns passed / failed / not done per step with the notes |
+| `handoff_request_secret` | `file` (absolute or relative to the project root), `label` (what to enter), `key` (optional, e.g. `API_KEY`) | an `id` at once; `handoff_wait_for_result` returns `set` (never the value) or `dismissed` |
 | `handoff_show_images` | `paths` (image files, absolute or relative to the project root), `question` | an `id` at once; one image to approve, several to choose from |
 | `handoff_wait_for_result` | `id`, `timeoutSeconds` (1–50, default 50; MCP clients abort longer calls) | exit code and last 60 output lines, the chosen image (or approval) with the note and marked areas, the review result (`approved` or `changes requested` with the line notes), the chosen options and own answer, the dismiss note, or `pending` after the timeout (call again to keep waiting) |
 

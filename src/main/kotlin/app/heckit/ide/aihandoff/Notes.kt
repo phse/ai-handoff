@@ -46,7 +46,7 @@ import javax.swing.KeyStroke
  * Notiz des Nutzers an einer Zeile (oder einem Zeilenbereich) für Claude. Die Stelle hängt als Highlighter am Dokument
  * und wandert beim Bearbeiten mit; dadurch erscheint das Randsymbol in jedem Editor der Datei, auch im Diff.
  */
-class LineNote(val file: VirtualFile, val highlighter: RangeHighlighter, @Volatile var text: String) {
+class LineNote(val file: VirtualFile, val highlighter: RangeHighlighter, @Volatile var text: String, val deleted: String? = null) {
     val isValid get() = highlighter.isValid && file.isValid
     /** Erste und letzte Zeile, ab 0. */
     val lines: IntRange
@@ -57,10 +57,61 @@ class LineNote(val file: VirtualFile, val highlighter: RangeHighlighter, @Volati
         }
 }
 
-/** Offene Notizen eines Projekts. Nur im Speicher - sie sind für die laufende Übergabe gedacht, nicht als Ablage. */
+/**
+ * Offene Notizen eines Projekts. Sie überstehen einen Neustart der IDE und ein Plugin-Update (Arbeitsbereich des Projekts,
+ * `workspace.xml`): Datei, Zeilen, Text und die Zeile, an der sie hingen - hat sich die Datei inzwischen verschoben, sucht
+ * die Notiz ihre Zeile in der Nähe wieder.
+ */
 @Service(Service.Level.PROJECT)
-class NotesService(private val project: Project) {
+@com.intellij.openapi.components.State(name = "HandoffNotes", storages = [com.intellij.openapi.components.Storage(com.intellij.openapi.components.StoragePathMacros.WORKSPACE_FILE)])
+class NotesService(private val project: Project) : com.intellij.openapi.components.PersistentStateComponent<NotesService.Saved> {
     private val notes = CopyOnWriteArrayList<LineNote>()
+
+    class SavedNote {
+        var url: String = ""
+        var start: Int = 0
+        var end: Int = 0
+        var text: String = ""
+        var code: String = ""
+        var deleted: String? = null
+    }
+
+    class Saved {
+        var notes: MutableList<SavedNote> = mutableListOf()
+    }
+
+    override fun getState(): Saved = Saved().also { st ->
+        st.notes = com.intellij.openapi.application.ApplicationManager.getApplication().runReadAction(com.intellij.openapi.util.Computable<MutableList<SavedNote>> { all().map { n ->
+            val l = n.lines
+            val d = n.highlighter.document
+            SavedNote().apply {
+                url = n.file.url; start = l.first; end = l.last; text = n.text; deleted = n.deleted
+                code = d.getText(com.intellij.openapi.util.TextRange(d.getLineStartOffset(l.first), d.getLineEndOffset(l.first))).trim()
+            }
+        }.toMutableList() })
+    }
+
+    override fun loadState(state: Saved) {
+        val saved = state.notes.toList()
+        if (saved.isEmpty()) return
+        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({ restore(saved) }, project.disposed)
+    }
+
+    /** Gespeicherte Notizen wieder anbringen; die Zeile steht ggf. woanders, wenn die Datei außerhalb geändert wurde. */
+    private fun restore(saved: List<SavedNote>) {
+        for (s in saved) {
+            val file = com.intellij.openapi.vfs.VirtualFileManager.getInstance().findFileByUrl(s.url) ?: continue
+            val doc = FileDocumentManager.getInstance().getDocument(file) ?: continue
+            if (doc.lineCount == 0) continue
+            fun code(line: Int) = doc.getText(com.intellij.openapi.util.TextRange(doc.getLineStartOffset(line), doc.getLineEndOffset(line))).trim()
+            var start = s.start.coerceIn(0, doc.lineCount - 1)
+            if (s.code.isNotEmpty() && code(start) != s.code) {
+                (1..200).asSequence().flatMap { sequenceOf(s.start - it, s.start + it) }.firstOrNull { it in 0 until doc.lineCount && code(it) == s.code }?.let { start = it }
+            }
+            val end = (start + (s.end - s.start)).coerceIn(start, doc.lineCount - 1)
+            if (at(file, start) == null) add(doc, file, start, end, s.text, s.deleted)
+        }
+    }
 
     /** Gültige Notizen in Datei- und Zeilenfolge; Notizen, deren Stelle gelöscht wurde, fallen weg. */
     fun all(): List<LineNote> {
@@ -75,12 +126,12 @@ class NotesService(private val project: Project) {
     /** Notiz, deren erste Zeile [line] ist (dort steht der Text am Zeilenende). */
     fun startingAt(file: VirtualFile, line: Int): LineNote? = notes.firstOrNull { it.isValid && it.file == file && it.lines.first == line }
 
-    fun add(document: Document, file: VirtualFile, startLine: Int, endLine: Int, text: String): LineNote {
+    fun add(document: Document, file: VirtualFile, startLine: Int, endLine: Int, text: String, deleted: String? = null): LineNote {
         val h = DocumentMarkupModel.forDocument(document, project, true).addRangeHighlighter(
             null, document.getLineStartOffset(startLine), document.getLineEndOffset(endLine),
             HighlighterLayer.LAST, HighlighterTargetArea.LINES_IN_RANGE,
         )
-        val note = LineNote(file, h, text)
+        val note = LineNote(file, h, text, deleted)
         h.gutterIconRenderer = NoteRenderer(project, note)
         h.setErrorStripeMarkColor(COLOR)
         h.errorStripeTooltip = text
@@ -134,7 +185,8 @@ class NotesService(private val project: Project) {
             val where = n.file.path.removePrefix(base) + ":" + (l.first + 1) + (if (l.last > l.first) "-${l.last + 1}" else "")
             val d = n.highlighter.document
             val code = d.getText(com.intellij.openapi.util.TextRange(d.getLineStartOffset(l.first), d.getLineEndOffset(l.first))).trim().take(120)
-            "- $where: ${n.text.trim().replace("\n", "\n  ")}\n  > $code"
+            if (n.deleted != null) "- $where (at a deleted line, before the change: ${n.deleted.take(120)}): ${n.text.trim().replace("\n", "\n  ")}"
+            else "- $where: ${n.text.trim().replace("\n", "\n  ")}\n  > $code"
         }
     }
 
@@ -229,7 +281,7 @@ object NotePopup {
      * [target]: Dokument und Zeile, an die die Notiz gehört, wenn [editor] sie nur anzeigt (einseitiger Diff: eigenes,
      * zusammengesetztes Dokument); sonst das Dokument des Editors.
      */
-    fun show(project: Project, editor: Editor, line: Int, given: LineNote?, endLine: Int = line, target: Pair<com.intellij.openapi.editor.Document, Int>? = null) {
+    fun show(project: Project, editor: Editor, line: Int, given: LineNote?, endLine: Int = line, target: Pair<com.intellij.openapi.editor.Document, Int>? = null, deleted: String? = null) {
         // Immer nur ein Notizfenster: ein weiterer Klick aufs "+" ersetzt das offene, statt es zu überlagern.
         current?.takeIf { !it.isDisposed }?.cancel()
         val service = NotesService.getInstance(project)
@@ -246,32 +298,49 @@ object NotePopup {
             border = JBUI.Borders.empty(6)
             add(JBScrollPane(area).apply { preferredSize = Dimension(JBUI.scale(380), JBUI.scale(90)) }, BorderLayout.CENTER)
         }
+        // Klick daneben oder Wechsel zu einer anderen Datei schließt das Fenster und behält den Text; nur Esc verwirft ihn.
+        // Vorher blieb es offen und schwebte sogar über anderen Dateien (2026-11-19, Video).
         val popup = JBPopupFactory.getInstance().createComponentPopupBuilder(panel, area)
             .setTitle(if (existing == null) "Note for Claude" else "Edit Note for Claude")
             .setRequestFocus(true).setFocusable(true).setMovable(true).setResizable(true)
-            .setCancelOnClickOutside(false).setCancelKeyEnabled(true)
+            .setCancelOnClickOutside(true).setCancelKeyEnabled(false)
             .createPopup()
         current = popup
-        fun save() {
+        var discard = false
+        fun store() {
             val text = area.text.trim()
             when {
                 text.isEmpty() -> existing?.let { service.remove(it) }
-                existing != null -> service.update(existing, text)
-                target != null -> service.add(doc, file, target.second, target.second, text)
+                existing != null -> { if (text != existing.text) service.update(existing, text) }
+                target != null -> service.add(doc, file, target.second, target.second, text, deleted)
                 else -> service.add(editor.document, file, line, endLine.coerceAtMost(editor.document.lineCount - 1), text)
             }
-            popup.closeOk(null)
         }
+        fun save() { discard = true; store(); popup.closeOk(null) }
+        val hidden = java.awt.event.HierarchyListener { e ->
+            if (e.changeFlags and java.awt.event.HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && !editor.contentComponent.isShowing && !popup.isDisposed) popup.cancel()
+        }
+        editor.contentComponent.addHierarchyListener(hidden)
+        popup.addListener(object : com.intellij.openapi.ui.popup.JBPopupListener {
+            override fun onClosed(event: com.intellij.openapi.ui.popup.LightweightWindowEvent) {
+                editor.contentComponent.removeHierarchyListener(hidden)
+                // Ein angefangener neuer Text ohne Inhalt legt nichts an; eine geleerte bestehende Notiz bleibt (Löschen per Delete).
+                if (!discard && (existing == null || area.text.isNotBlank())) store()
+            }
+        })
         panel.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel("Enter saves · Shift+Enter new line · Esc cancels").apply {
+            add(JBLabel("Enter saves · Esc discards · Click outside keeps it").apply {
                 foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont()
             }, BorderLayout.WEST)
-            if (existing != null) add(ActionLink("Delete") { service.remove(existing); popup.cancel() }, BorderLayout.EAST)
+            if (existing != null) add(ActionLink("Delete") { discard = true; service.remove(existing); popup.cancel() }, BorderLayout.EAST)
         }, BorderLayout.SOUTH)
         object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) = save()
         }.registerCustomShortcutSet(CustomShortcutSet(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0)), area)
+        object : DumbAwareAction() {
+            override fun actionPerformed(e: AnActionEvent) { discard = true; popup.cancel() }
+        }.registerCustomShortcutSet(CustomShortcutSet(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0)), area)
         val at = editor.logicalPositionToXY(LogicalPosition(line + 1, 0))
         popup.show(RelativePoint(editor.contentComponent, at))
     }

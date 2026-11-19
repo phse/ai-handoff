@@ -69,6 +69,23 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.10.0</h3>
+            <ul>
+              <li>Checklists for manual tests (<code>handoff_checklist</code>): each step with a checkbox and a note, the
+                  results go back to Claude in one go.</li>
+              <li>Secrets (<code>handoff_request_secret</code>): you type a password or token into a card, Handoff writes it
+                  into the file (e.g. <code>.env</code>) and Claude never sees it; a warning if Git does not ignore the file.</li>
+              <li>Rewind per prompt: <b>↶</b> next to a prompt in the session tab goes back to before it (code, conversation
+                  or both).</li>
+              <li><b>Open in Handoff</b> in the terminal's context menu shows the Claude Code session of that tab; terminal
+                  tabs are found by process, also after a plugin update.</li>
+              <li>Line notes are kept across restarts and can be attached to deleted lines in the diff; the note window
+                  closes when you click elsewhere and keeps the text.</li>
+              <li>Pasted file paths become short tokens in the prompt field like dropped files.</li>
+              <li>Fixes: cards appear in the session tab that sent them, closing a file opened from a session tab returns to
+                  it, terminal tab names no longer flicker, prompts sent while Claude was idle show in the right place,
+                  card inputs keep the focus while other sessions change.</li>
+            </ul>
             <h3>1.9.1</h3>
             <ul>
               <li>The description and the guide now cover session logs: any Claude Code <code>.jsonl</code> transcript opens as a
@@ -354,6 +371,8 @@ tasks.runIde {
         dependsOn(prepareScreenshotProject)
         args(screenshotProjectDir)
         jvmArgs("-Dhandoff.screenshots=${file(screenshotDir).absolutePath}")
+        // -PscreenshotsOnly=cards: nur die Prüfkarten (Prüfliste, Geheimnis) aufnehmen, für Prüfbilder ohne den ganzen Lauf.
+        providers.gradleProperty("screenshotsOnly").orNull?.let { jvmArgs("-Dhandoff.screenshots.only=$it") }
     } else {
         providers.gradleProperty("openProject").orNull?.let { args(it) }
     }

@@ -255,15 +255,18 @@ internal class HandoffPanel(private val project: Project, private val compact: B
     private var lastKey: Any? = null
 
     private fun rebuildCompact() {
-        list.removeAll()
         // Im Session-Reiter nur Karten dieser Session (bzw. ohne sicher bekannte Session) - nicht die Frage der Nachbar-Session.
         val me = sessionOf?.invoke()
         val pending = service.proposals.filter { it.isPending && !it.hidden && (me == null || it.owner == null || it.owner == me) }.sortedBy { it.createdAt }
         // Unverändert: nichts anfassen. Jedes Neu-Aufbauen löste ein Layout des ganzen Verlaufs aus - im Nachbar-Reiter sprang
         // die Scroll-Position, als dort eine fremde (ausgeblendete) Karte kam (2026-11-16); auch ein laufendes Diktat brach ab.
-        val key = pending.map { it.id to it.page } to pending.map { it.state }
+        // Derselbe Schlüssel wie im Tool Window (Auswahl, Prüfliste, …). Geleert wird erst danach: Stand removeAll() davor, baute
+        // jede Änderung irgendeiner Session die Karten neu, und ein angefangenes Geheimnis verlor den Fokus ans Eingabefeld
+        // (2026-11-19, Fehler seit 1.5.2).
+        val key = pending.map { proposalKey(it) }
         if (key == lastKey && list.componentCount > 0 == pending.isNotEmpty()) return
         lastKey = key
+        list.removeAll()
         pending.forEach { list.add(hoverClose(card(it), "Dismiss") { service.close(it) }); list.add(Box.createVerticalStrut(JBUI.scale(8))) }
         isVisible = pending.isNotEmpty()
         list.revalidate(); list.repaint()
@@ -276,7 +279,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
 
     /** Schlüssel einer Karte: Ändert er sich, wird sie neu gebaut; sonst bleibt die Komponente samt Fokus und Diktat stehen. */
     private fun proposalKey(p: Proposal): Any = listOf("p", p.id, p.state, p.page, p.exitCode, p.note, p.chosen, p.selected,
-        p.steps.map { it.exitCode to it.running }, p.marks.mapValues { it.value.size }, p.shapes.keys.toSet(), p.lineNotes)
+        p.steps.map { it.exitCode to it.running }, p.marks.mapValues { it.value.size }, p.shapes.keys.toSet(), p.lineNotes,
+        p.checks.map { it.result to it.noteOpen })
 
     /**
      * [container] auf die Karten [items] (Schlüssel → Bauanleitung) bringen, ohne unveränderte anzufassen: Bisher baute jede
@@ -399,20 +403,31 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         add(link("Show Full Guide") { Guide.open(project) })
     }
 
-    /** Einzeiliger Hinweis nach einem Update, bis er weggeklickt oder die Anleitung geöffnet wird. */
+    /**
+     * Hinweis nach einem Update, bis er weggeklickt oder die Anleitung geöffnet wird: oben die Links und ✕, darunter der Text
+     * über die volle Breite (neben den Links blieb ihm im schmalen Tool Window nur eine schmale Spalte, 2026-11-19).
+     */
     private fun newsBanner(version: String, news: String): JPanel {
-        val banner = JPanel(BorderLayout(JBUI.scale(8), 0))
+        val banner = JPanel(BorderLayout(0, JBUI.scale(4)))
         fun close() { Guide.markNewsSeen(); remove(banner); revalidate(); repaint() }
         banner.border = JBUI.Borders.compound(JBUI.Borders.customLineBottom(JBColor.border()), JBUI.Borders.empty(6, 10))
         banner.background = JBColor.namedColor("Banner.infoBackground", JBColor(0xF5F8FE, 0x25324D))
-        banner.add(JBLabel("<html><b>New in $version:</b> ${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(news.replace("**", "").replace("`", ""))}</html>"), BorderLayout.CENTER)
-        banner.add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0)).apply {
+        val links = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS); isOpaque = false
+            val items = listOfNotNull(
+                if (Features.missing(project).isNotEmpty()) com.intellij.ui.components.ActionLink("Update CLAUDE.md…") { showFeatures() } else null,
+                com.intellij.ui.components.ActionLink("What's new") { Guide.openNews(project, version); close() },
+                com.intellij.ui.components.ActionLink("Guide") { Guide.open(project); close() },
+            )
+            items.forEachIndexed { i, link -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(12))); add(link) }
+        }
+        banner.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            if (Features.missing(project).isNotEmpty()) add(com.intellij.ui.components.ActionLink("Update CLAUDE.md…") { showFeatures() })
-            add(com.intellij.ui.components.ActionLink("What's new") { Guide.openNews(project, version); close() })
-            add(com.intellij.ui.components.ActionLink("Guide") { Guide.open(project); close() })
-            add(com.intellij.ui.InplaceButton("Close", AllIcons.Actions.Close) { close() })
-        }, BorderLayout.EAST)
+            add(links, BorderLayout.WEST)
+            add(com.intellij.ui.InplaceButton("Close", AllIcons.Actions.Close) { close() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+        banner.add(JBLabel("<html><b>New in $version:</b> ${com.intellij.openapi.util.text.StringUtil.escapeXmlEntities(news.replace("**", "").replace("`", ""))}</html>")
+            .setAllowAutoWrapping(true), BorderLayout.CENTER)
         return banner
     }
 
@@ -548,7 +563,9 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         } + (p.note?.let { ": $it" } ?: "")
         card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            // Titel in CENTER, nicht WEST: WEST bekommt immer seine volle Breite und lag bei langen Changelist-Namen über
+            // Uhrzeit und ✕ (2026-11-18). CENTER kürzt mit "…", der volle Text steht im Tooltip - so in allen Kartenköpfen.
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent; toolTipText = status; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
 
@@ -660,7 +677,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val timeLabel = JBLabel(time.format(Date(s.at))).apply { foreground = UIUtil.getContextHelpForeground() }
         val header = JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(title).apply { foreground = accent }, BorderLayout.WEST)
+            add(JBLabel(title).apply { foreground = accent; toolTipText = title; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(timeLabel, BorderLayout.EAST)
         }
         card.add(header, BorderLayout.NORTH)
@@ -739,7 +756,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val card = cardPanel(accent)
         card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel("Claude is working…").apply { foreground = accent }, BorderLayout.WEST)
+            add(JBLabel("Claude is working…").apply { foreground = accent; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(JBLabel("since " + time.format(Date(w.since))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
         card.add(JPanel().apply {
@@ -772,7 +789,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         }
         card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent; toolTipText = status; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
 
@@ -839,6 +856,136 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         return card
     }
 
+    private fun cardHead(card: JPanel, status: String, accent: java.awt.Color, p: Proposal) {
+        card.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent; toolTipText = status; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
+            add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+    }
+
+    /**
+     * Prüfliste für einen Handtest: je Schritt ein Häkchen links (geht) und rechts die Sprechblase für eine Notiz. Ein nicht
+     * abgehakter Schritt mit Notiz geht als fehlgeschlagen an Claude, ohne Notiz als nicht gemacht. Vorher waren es ✓/✗
+     * rechts - umständlich, und ✗ wirkte wie Löschen (2026-11-19).
+     */
+    private fun checklistCard(p: Proposal): JPanel {
+        val pending = p.isPending
+        val ok = p.checks.count { it.result == 1 }; val bad = p.checks.count { it.result == 2 }
+        val accent = when {
+            p.state == Proposal.State.FINISHED && bad == 0 -> JBColor(0x5A9E6F, 0x5A9E6F)
+            p.state == Proposal.State.FINISHED -> JBColor(0xC75450, 0xC75450)
+            pending -> JBColor(0x2A7AA0, 0x5AA8D0)
+            else -> JBColor.border()
+        }
+        val card = cardPanel(accent)
+        val status = when (p.state) {
+            Proposal.State.PENDING -> "Test · $ok of ${p.checks.size} checked"
+            Proposal.State.FINISHED -> "Tested · $ok passed" + (if (bad > 0) ", $bad failed" else "")
+            else -> "Dismissed" + (p.note?.let { ": $it" } ?: "")
+        }
+        cardHead(card, status, accent, p)
+        val body = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false }
+        if (p.reason.isNotBlank()) { body.add(markdown(p.reason)); body.add(Box.createVerticalStrut(JBUI.scale(6))) }
+        val grey = UIUtil.getContextHelpForeground()
+        p.checks.forEachIndexed { i, c ->
+            val text = JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+                add(markdown(c.step))
+                if (c.expected.isNotBlank()) add(wrapped("Expected: " + Md.plain(c.expected)).apply { foreground = grey })
+            }
+            val lead: JComponent = if (pending) JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                add(com.intellij.ui.components.JBCheckBox().apply {
+                    isSelected = c.result == 1; isOpaque = false; toolTipText = "Works"
+                    addActionListener { c.result = if (isSelected) 1 else 0; service.fireChanged() }
+                })
+                add(JBLabel("${i + 1}").apply { foreground = grey; border = JBUI.Borders.emptyLeft(2) })
+            } else {
+                val icon = when (c.result) { 1 -> AllIcons.RunConfigurations.TestPassed; 2 -> AllIcons.RunConfigurations.TestFailed; else -> AllIcons.RunConfigurations.TestNotRan }
+                JBLabel("${i + 1}", icon, JBLabel.LEFT).apply { verticalAlignment = JBLabel.TOP; foreground = grey }
+            }
+            body.add(JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
+                isOpaque = false; alignmentX = LEFT_ALIGNMENT
+                add(lead, BorderLayout.WEST)
+                add(text, BorderLayout.CENTER)
+                if (pending) add(JPanel(FlowLayout(FlowLayout.RIGHT, 0, 0)).apply {
+                    isOpaque = false
+                    add(com.intellij.ui.InplaceButton(com.intellij.openapi.ui.popup.IconButton("Add a note to this step", HandoffIcons.note())) {
+                        // Zuklappen nur ohne Text - sonst ginge die Notiz still verloren.
+                        c.noteOpen = !c.noteOpen || c.note.isNotBlank(); c.focusNote = c.noteOpen; service.fireChanged()
+                    }.apply { border = JBUI.Borders.empty(2, 4) })
+                }, BorderLayout.EAST)
+            })
+            if (pending && (c.noteOpen || c.note.isNotBlank())) {
+                val field = JBTextField(c.note).apply { emptyText.text = "Note on this step, e.g. what happened instead" }
+                field.document.addDocumentListener(object : DocumentAdapter() { override fun textChanged(e: DocumentEvent) { c.note = field.text } })
+                body.add(Dictation.withMic(field).apply { alignmentX = LEFT_ALIGNMENT; border = JBUI.Borders.emptyLeft(JBUI.scale(28)) })
+                if (c.focusNote) { c.focusNote = false; SwingUtilities.invokeLater { field.requestFocusInWindow() } }
+            } else if (!pending && c.note.isNotBlank()) body.add(wrapped(c.note).apply { foreground = grey; border = JBUI.Borders.emptyLeft(JBUI.scale(28)) })
+            body.add(Box.createVerticalStrut(JBUI.scale(4)))
+        }
+        card.add(body, BorderLayout.CENTER)
+        if (!pending) return card
+        val note = JBTextField(p.noteDraft).apply { emptyText.text = "Note for Claude (optional)" }
+        note.document.addDocumentListener(object : DocumentAdapter() { override fun textChanged(e: DocumentEvent) { p.noteDraft = note.text } })
+        val send = JButton("Send Results").apply {
+            primary()
+            toolTipText = "Unchecked steps go to Claude as failed if they have a note, otherwise as not done"
+            addActionListener {
+                p.checks.forEach { if (it.result != 1) it.result = if (it.note.isNotBlank()) 2 else 0 }
+                p.note = p.noteDraft.takeIf { it.isNotBlank() }; service.answer(p)
+            }
+        }
+        val dismiss = dismissButton("Dismiss").apply { addActionListener { service.dismiss(p, note.text) } }
+        card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+            isOpaque = false
+            add(Dictation.withMic(note), BorderLayout.NORTH)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                add(send); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
+            }, BorderLayout.SOUTH)
+        }, BorderLayout.SOUTH)
+        return card
+    }
+
+    /** Geheimnis eingeben: Das Plugin schreibt den Wert in die Datei, Claude erfährt nur, dass er gesetzt ist. */
+    private fun secretCard(p: Proposal): JPanel {
+        val r = p.secret!!
+        val pending = p.isPending
+        val accent = when (p.state) {
+            Proposal.State.PENDING -> JBColor(0xB04079, 0xC86A9A)
+            Proposal.State.FINISHED -> JBColor(0x5A9E6F, 0x5A9E6F)
+            else -> JBColor.border()
+        }
+        val card = cardPanel(accent)
+        cardHead(card, when (p.state) { Proposal.State.PENDING -> "Secret"; Proposal.State.FINISHED -> "Secret saved"; else -> "Dismissed" + (p.note?.let { ": $it" } ?: "") }, accent, p)
+        val base = project.basePath.orEmpty().trimEnd('/') + "/"
+        val where = r.file.path.removePrefix(base).replace(System.getProperty("user.home"), "~") + (if (r.key.isNotEmpty()) " · ${r.key}" else " (whole file)")
+        card.add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
+            add(wrapped(p.reason))
+            add(grey(where))
+        }, BorderLayout.CENTER)
+        if (!pending) return card
+        val field = javax.swing.JPasswordField().apply { toolTipText = "Goes straight into the file - Claude never sees it" }
+        val save = JButton("Save").apply { primary(); isEnabled = false }
+        field.document.addDocumentListener(object : DocumentAdapter() { override fun textChanged(e: DocumentEvent) { save.isEnabled = field.password.isNotEmpty() } })
+        fun store() { if (field.password.isNotEmpty()) { val v = field.password; field.text = ""; service.saveSecret(p, v) } }
+        save.addActionListener { store() }
+        field.addActionListener { store() }
+        val dismiss = dismissButton("Dismiss").apply { addActionListener { service.dismiss(p, null) } }
+        card.add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
+            isOpaque = false
+            add(field, BorderLayout.NORTH)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+                isOpaque = false
+                add(save); add(Box.createHorizontalStrut(JBUI.scale(6))); add(dismiss)
+            }, BorderLayout.SOUTH)
+        }, BorderLayout.SOUTH)
+        return card
+    }
+
     /** Ablauf aus mehreren Befehlen: alle nacheinander oder Schritt für Schritt, Stopp beim ersten Fehler. */
     private fun sequenceCard(p: Proposal): JPanel {
         val n = p.steps.size
@@ -862,7 +1009,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         }
         card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent; toolTipText = status; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
 
@@ -934,6 +1081,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         if (p.steps.isNotEmpty()) return sequenceCard(p)
         if (p.images.isNotEmpty()) return imageCard(p)
         if (p.isAsk) return askCard(p)
+        if (p.isChecklist) return checklistCard(p)
+        if (p.secret != null) return secretCard(p)
         val accent = when {
             p.state == Proposal.State.FINISHED && p.exitCode == 0 -> JBColor(0x5A9E6F, 0x5A9E6F)
             p.state == Proposal.State.FINISHED -> JBColor(0xC75450, 0xC75450)
@@ -952,7 +1101,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         }
         val head = JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent; toolTipText = status; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }
         val reason = JBTextArea(p.reason).apply {
@@ -1069,7 +1218,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         } + (p.note?.let { ": $it" } ?: "")
         card.add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent }, BorderLayout.WEST)
+            add(JBLabel(status).apply { foreground = if (accent == JBColor.border()) UIUtil.getContextHelpForeground() else accent; toolTipText = status; border = JBUI.Borders.emptyRight(8) }, BorderLayout.CENTER)
             add(JBLabel(time.format(Date(p.createdAt))).apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
 

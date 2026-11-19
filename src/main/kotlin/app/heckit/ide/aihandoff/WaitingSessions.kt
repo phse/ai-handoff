@@ -15,7 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * "Claude wartet auf dich": Hooks von Claude Code legen je Session Dateien in `~/.claude/handoff/waiting/` ab:
  * - `<id>.info`: letzte Hook-Daten der Session (Arbeitsordner, Protokoll), bei jedem Ereignis neu; `<id>.tab`: Kennung des
- *   Terminal-Reiters, wenn Handoff die Session gestartet hat (Umgebungsvariable `HANDOFF_TAB`).
+ *   Terminal-Reiters, wenn Handoff die Session gestartet hat (Umgebungsvariable `HANDOFF_TAB`); `<id>.pid`: Prozess von
+ *   Claude Code (Elternprozess des Hooks) - darüber findet die IDE den Terminal-Reiter, in dem die Session läuft.
  * - `<id>.busy`: Claude arbeitet (UserPromptSubmit), `<id>.json`: fertig (Stop) oder braucht eine Eingabe (Notification).
  * - `<id>.open`: `/show-in-editor` - die IDE soll die Session im Editor-Reiter zeigen.
  * SessionEnd räumt alles weg. Eingerichtet wie die Statuszeile: ein Skript in `~/.claude/handoff/` und Einträge in
@@ -57,6 +58,8 @@ object WaitingHook {
             " instead of writing them as a text line or asking whether to run them, and wait for the outcome with handoff_wait_for_result."
         if (ok("handoff_ask")) parts += "Ask questions with options (which variant, which findings to save) with handoff_ask instead of in the text."
         if (ok("handoff_request_review")) parts += "When a task with file changes is done, ask the user to review it with handoff_request_review."
+        if (ok("handoff_checklist")) parts += "Hand over steps the user should try by hand as handoff_checklist instead of a numbered list."
+        if (ok("handoff_request_secret")) parts += "Never ask for passwords or tokens in the chat: let the user enter them with handoff_request_secret."
         parts += "These handoff tools are often deferred: load them via ToolSearch (query handoff) before the first call. " +
             "Put slash commands for the user (e.g. /compact with instructions, skills) on their own line or in backticks: the tab offers them to run or insert."
         return parts.joinToString(" ")
@@ -75,6 +78,9 @@ object WaitingHook {
         Triple("UserPromptSubmit", "busy", null),
         // Fragen von Claude Code (AskUserQuestion) in Sessions im Handoff-Reiter: im Reiter beantworten statt im Terminal.
         Triple("PreToolUse", "ask", "AskUserQuestion"),
+        // Aufrufe der Handoff-Werkzeuge: Der MCP-Aufruf selbst sagt nicht, welche Session ihn schickt - der Hook schon. So
+        // landet die Karte im richtigen Session-Reiter statt in einem geratenen (2026-11-19, „Karten vogelwild“).
+        Triple("PreToolUse", "tool", "mcp__.*__handoff_.*"),
         Triple("SessionEnd", "end", null),
     )
 
@@ -134,13 +140,19 @@ object WaitingHook {
         |[ -n "${'$'}id" ] || exit 0
         |f="${'$'}dir/${'$'}id"
         |if [ "${'$'}1" = "end" ] || [ "${'$'}1" = "clear" ]; then
-        |  rm -f "${'$'}f.json" "${'$'}f.listen" "${'$'}f.reply" "${'$'}f.busy" "${'$'}f.info" "${'$'}f.tab" "${'$'}f.open" "${'$'}f.ask" "${'$'}f.answer"
+        |  rm -f "${'$'}f.json" "${'$'}f.listen" "${'$'}f.reply" "${'$'}f.busy" "${'$'}f.info" "${'$'}f.tab" "${'$'}f.open" "${'$'}f.ask" "${'$'}f.answer" "${'$'}f.pid" "${'$'}f.call"
         |  exit 0
         |fi
         |mkdir -p "${'$'}dir" || exit 0
         |printf '%s' "${'$'}input" > "${'$'}f.itmp" && mv "${'$'}f.itmp" "${'$'}f.info"
         |[ -n "${'$'}HANDOFF_TAB" ] && printf '%s' "${'$'}HANDOFF_TAB" > "${'$'}f.tab"
+        |# Claude Code runs hooks as its own child: the IDE finds the session's terminal tab through this process.
+        |printf '%s' "${'$'}PPID" > "${'$'}f.pid"
         |case "${'$'}1" in
+        |  tool)
+        |    # A handoff_* MCP call is about to go out: the IDE matches it to this session by tool name and input.
+        |    printf '%s' "${'$'}input" > "${'$'}f.ctmp" && mv "${'$'}f.ctmp" "${'$'}f.call"
+        |    exit 0 ;;
         |  start)
         |    # Sessions shown in a Handoff editor tab: tell Claude that links there open in the IDE.
         |    [ -n "${'$'}HANDOFF_TAB" ] && printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"${startHint()}"}}'
@@ -244,7 +256,7 @@ class WaitingSession(val file: File, val at: Long, val cwd: String, val finished
 class WorkingSession(val id: String, val since: Long, val cwd: String, val prompt: String)
 
 /** Was die Hooks zuletzt über eine Session gemeldet haben. [tab]: Kennung des Terminal-Reiters, wenn Handoff sie gestartet hat. */
-class SessionInfo(val id: String, val at: Long, val cwd: String, val transcript: String?, val tab: String?)
+class SessionInfo(val id: String, val at: Long, val cwd: String, val transcript: String?, val tab: String?, val pid: Long? = null)
 
 @Service(Service.Level.PROJECT)
 class WaitingSessions(private val project: Project, private val scope: CoroutineScope) {
@@ -325,6 +337,33 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         return true
     }
 
+    /**
+     * Session im Editor-Reiter zeigen (`/show-in-editor`, „Open in Handoff“ im Terminal). Läuft sie im Terminal der IDE, aber
+     * nicht in einem Reiter, den Handoff kennt, übernimmt der Editor-Reiter diesen Terminal-Reiter - dann gehen Eingaben samt
+     * Slash-Befehlen dorthin. Gesucht wird erst über den Prozess (`.pid`), sonst über die Kennung [ref], die der Hook ins
+     * Terminal geschrieben hat. Das gilt auch für Reiter, die Handoff gestartet, nach einem Plugin-Update ohne Neustart aber
+     * vergessen hat ("Terminal closed", obwohl Claude dort weiterlief, 2026-11-18). Auf dem EDT.
+     */
+    fun showInEditor(info: SessionInfo, ref: String? = null) {
+        val id = info.id
+        fun adopted(tab: String) {
+            runCatching { File(WaitingHook.waiting, "$id.tab").writeText(tab) }
+            infos = infos + (id to SessionInfo(id, info.at, info.cwd, info.transcript, tab, info.pid))
+            HandoffService.getInstance(project).fireChanged()
+            SessionEditors.openWithTerminal(project, tab, id)
+        }
+        if (info.tab == null || !SessionTerminals.isOpen(project, info.tab)) {
+            val byPid = info.pid?.let { SessionTerminals.adoptByPid(project, it, keep = info.tab) }
+            if (byPid != null) { adopted(byPid); return }
+            if (!ref.isNullOrEmpty()) SessionTerminals.adopt(project, ref, keep = info.tab) { adopted(it) }
+        }
+        SessionEditors.open(project, info.tab, id, focus = true)
+    }
+
+    /** Session, deren Claude-Prozess in der Shell [shellPid] läuft (Terminal-Reiter), die jüngste bei mehreren. */
+    fun sessionInShell(shellPid: Long): SessionInfo? =
+        infos.values.filter { i -> i.pid != null && SessionTerminals.ancestors(i.pid).contains(shellPid) }.maxByOrNull { it.at }
+
     /** Ob [reply] für diese Session etwas senden kann, und ob auch Slash-Befehle ankommen (nur über das Terminal). */
     fun canReply(id: String): Boolean = canSendKeys(id) || waiting(id)?.listening == true
     fun canSendKeys(id: String): Boolean = infos[id]?.tab?.let { SessionTerminals.isOpen(project, it) } == true
@@ -397,7 +436,8 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             val id = f.name.removeSuffix(".info")
             if (cwd == null || (!inProject(cwd) && id !in own)) return@mapNotNull null
             if (id in foreign) return@mapNotNull null
-            SessionInfo(id, f.lastModified(), cwd, o.str("transcript_path"), byName["$id.tab"]?.let { runCatching { it.readText().trim() }.getOrNull() })
+            SessionInfo(id, f.lastModified(), cwd, o.str("transcript_path"), byName["$id.tab"]?.let { runCatching { it.readText().trim() }.getOrNull() },
+                byName["$id.pid"]?.let { runCatching { it.readText().trim().toLong() }.getOrNull() })
         }.associateBy { it.id }
 
         val found = byName.values.filter { it.name.endsWith(".json") }.mapNotNull { f ->
@@ -439,17 +479,7 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             val ref = runCatching { f.readText().trim() }.getOrDefault("")
             f.delete()
             infos = infos + (id to info)
-            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({
-                // Session im Terminal der IDE, aber nicht von Handoff gestartet: Reiter über die Kennung suchen, die der Hook
-                // ins Terminal geschrieben hat - dann gehen Eingaben samt Slash-Befehlen auch dorthin.
-                if (info.tab == null && ref.isNotEmpty()) SessionTerminals.adopt(project, ref) { tab ->
-                    runCatching { File(WaitingHook.waiting, "$id.tab").writeText(tab) }
-                    infos = infos + (id to SessionInfo(id, info.at, info.cwd, info.transcript, tab))
-                    HandoffService.getInstance(project).fireChanged()
-                    SessionEditors.open(project, tab, id, focus = true)
-                }
-                SessionEditors.open(project, info.tab, id, focus = true)
-            }, project.disposed)
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({ showInEditor(info, ref) }, project.disposed)
         }
 
         val infosChanged = newInfos.mapValues { it.value.at to it.value.tab } != infos.mapValues { it.value.at to it.value.tab }

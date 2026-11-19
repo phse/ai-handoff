@@ -68,8 +68,10 @@ object ScreenshotMaker {
         Thread.sleep(2000)
         edt { (tw as? ToolWindowEx)?.stretchWidth(520 - tw.component.width) }
 
-        // 1: Befehle und Bildauswahl
         val service = HandoffService.getInstance(project)
+        if (System.getProperty("handoff.screenshots.only") == "cards") { cards(project, frame, tw, service, base, out); return }
+
+        // 1: Befehle und Bildauswahl
         val images = listOf("a-rounded.png", "b-pill.png", "c-square.png").map { File(base, "design/$it").path }
         edt {
             service.propose("npm run deploy:production", "Publishes release 2.4.0 to the live site.", "", true)
@@ -180,6 +182,9 @@ object ScreenshotMaker {
         Thread.sleep(2500)
         shot(frame, File(out, "09-ask.png"))
 
+        // 7b: Prüfliste und Geheimnis
+        cards(project, frame, tw, service, base, out, "10-checklist.png")
+
         // 8: Handoff Tools (Dialog als eigenes Bild)
         var tools: app.heckit.ide.aihandoff.ToolsDialog? = null
         ApplicationManager.getApplication().invokeLater({
@@ -195,7 +200,7 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "10-tools.png"))
+            ImageIO.write(image, "png", File(out, "11-tools.png"))
         }
         edt { tools?.close(1) }
         Thread.sleep(1000)
@@ -448,6 +453,28 @@ object ScreenshotMaker {
             lines.append("""{"type":"ai-title","aiTitle":"$title"}""").append('\n')
             File(dir, java.util.UUID.nameUUIDFromBytes(title.toByteArray()).toString() + ".jsonl").writeText(lines.toString())
         }
+    }
+
+    /** Prüfbilder der Karten Prüfliste und Geheimnis (offen, teils abgehakt, erledigt); mit [name] nur das offene Bild für den Marketplace. */
+    private fun cards(project: Project, frame: JFrame, tw: com.intellij.openapi.wm.ToolWindow, service: HandoffService, base: File, out: File, name: String? = null) {
+        edt {
+            service.proposals.clear()
+            service.proposeChecklist("Test the free shipping threshold", listOf(
+                app.heckit.ide.aihandoff.CheckItem("Add items for **45 €** to the cart", "Shipping shows 4.90 €"),
+                app.heckit.ide.aihandoff.CheckItem("Add one more item so the total passes 50 €", "Shipping shows **free**"),
+                app.heckit.ide.aihandoff.CheckItem("Remove the item again"),
+            )).also { p -> p.checks[0].result = 1; p.checks[1].note = "Still 4.90 € until reload"; service.fireChanged() }
+            service.proposeSecret("Your npm token from npmjs.com → Access Tokens (Automation).", File(base, ".env"), "NPM_TOKEN")
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
+        }
+        Thread.sleep(3000)
+        shot(frame, File(out, name ?: "cards-pending.png"))
+        if (name != null) return
+        edt {
+            service.proposals.forEach { p -> if (p.isChecklist) service.answer(p) }
+        }
+        Thread.sleep(2000)
+        shot(frame, File(out, "cards-done.png"))
     }
 
     /** Zeichnet den Frame und alle darüber liegenden Fenster (Dialoge) in ein PNG. */

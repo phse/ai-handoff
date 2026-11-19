@@ -196,6 +196,56 @@ class HandoffToolset : McpToolset {
     @McpTool
     @McpDescription(
         """
+        |Hands the user a checklist for a manual test as a card in the IDE: one step per item, the user marks each as
+        |passed or failed and can add a note. Use it instead of a numbered list in the chat whenever the user should try
+        |something by hand (after a fix, before a release). Returns an id; call handoff_wait_for_result with it to get
+        |the result per step.
+        """
+    )
+    suspend fun handoff_checklist(
+        @McpDescription("The steps in order, each one action or check.")
+        items: List<CheckItem>,
+        @McpDescription("Heading for the card, one short sentence (e.g. \"Test the new export\").")
+        title: String = "",
+    ): String {
+        val project = currentCoroutineContext().project
+        val list = items.map { it.copy(step = it.step.trim(), expected = it.expected.trim()) }.filter { it.step.isNotEmpty() }
+        if (list.isEmpty()) return "No steps given."
+        val p = HandoffService.getInstance(project).proposeChecklist(title.trim(), list)
+        ApplicationManager.getApplication().invokeLater({ SessionEditors.revealCards(project, p) }, project.disposed)
+        return "Checklist handed over as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to get the results."
+    }
+
+    @McpTool
+    @McpDescription(
+        """
+        |Asks the user to type a secret (password, API token, key) into a field in the IDE. The plugin writes it into the
+        |file itself - you never see the value. Use it instead of asking for secrets in the chat or telling the user to
+        |edit the file. With key, the line KEY=value is replaced or added (.env, .properties, gradle.properties); without
+        |key, the value becomes the whole file. Returns an id; call handoff_wait_for_result with it.
+        """
+    )
+    suspend fun handoff_request_secret(
+        @McpDescription("Target file, absolute or relative to the project root (e.g. .env).")
+        file: String,
+        @McpDescription("One sentence for the user: what to enter and where to get it (e.g. \"Your Marketplace token from plugins.jetbrains.com/author/me/tokens\").")
+        label: String,
+        @McpDescription("Variable name for a KEY=value line (e.g. API_TOKEN). Empty = the value becomes the whole file.")
+        key: String = "",
+    ): String {
+        val project = currentCoroutineContext().project
+        val base = project.basePath ?: System.getProperty("user.home")
+        val target = (if (File(file).isAbsolute) File(file) else File(base, file)).normalize()
+        if (target.isDirectory) return "That is a folder: ${target.path}"
+        if (key.isNotEmpty() && !Regex("^[A-Za-z_][A-Za-z0-9_.\\-]*$").matches(key)) return "Invalid key: $key"
+        val p = HandoffService.getInstance(project).proposeSecret(label.trim(), target, key.trim())
+        ApplicationManager.getApplication().invokeLater({ SessionEditors.revealCards(project, p) }, project.disposed)
+        return "Asked as ${p.id}. Call handoff_wait_for_result(id=\"${p.id}\") to learn whether the user entered it."
+    }
+
+    @McpTool
+    @McpDescription(
+        """
         |Asks the user to review the changes you made before you go on (or before you call the task done). The user reads
         |the diff in the IDE, can attach notes to individual lines and then approves or sends the notes back.
         |Reviews the changelist of the current or last task (handoff_begin_task), otherwise all local changes.

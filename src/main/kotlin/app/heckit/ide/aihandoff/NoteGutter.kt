@@ -63,6 +63,21 @@ object NoteGutter {
     }
 
     /**
+     * Zeile, die im einseitigen Diff nur in der alten Fassung steht (gelöscht): Die Notiz hängt dann an der Zeile der neuen
+     * Fassung, an der die Löschung liegt, und nimmt den gelöschten Text mit. Liefert Zeile im echten Dokument und Text, sonst null.
+     */
+    fun deletedTarget(editor: Editor, line: Int): Pair<Int, String>? {
+        val viewer = unified(editor) ?: return null
+        val doc = document(editor)
+        if (doc === editor.document || doc.lineCount == 0) return null
+        if (viewer.transferLineFromOnesideStrict(com.intellij.diff.util.Side.RIGHT, line) >= 0) return null
+        val real = viewer.transferLineFromOneside(com.intellij.diff.util.Side.RIGHT, line).coerceIn(0, doc.lineCount - 1)
+        val d = editor.document
+        val text = d.getText(com.intellij.openapi.util.TextRange(d.getLineStartOffset(line), d.getLineEndOffset(line))).trim()
+        return real to text
+    }
+
+    /**
      * "+" auch in normalen Editoren - immer, solange das Werkzeug für Notizen (handoff_get_notes) in **Handoff Tools…** erlaubt
      * ist (2026-11-18; vorher nur bei wartendem Review oder vorhandenen Notizen, das wirkte zufällig). Die Einstellung steht in
      * ~/.claude/settings.json - darum nur alle paar Sekunden gelesen.
@@ -119,8 +134,8 @@ object NoteGutter {
             if (editor.editorKind != EditorKind.DIFF && !reviewing(project)) return
             // Kein "+" an Zeilen mit Notiz - dort steht die Sprechblase.
             if (newLine < 0 || newLine >= document.lineCount) return
-            val real = realLine(editor, newLine)
-            if (real < 0 || NotesService.getInstance(project).at(file, real) != null) return
+            val real = realLine(editor, newLine).takeIf { it >= 0 } ?: deletedTarget(editor, newLine)?.first ?: return
+            if (NotesService.getInstance(project).at(file, real) != null) return
             highlighter = editor.markupModel.addRangeHighlighter(
                 null, document.getLineStartOffset(newLine), document.getLineStartOffset(newLine), HighlighterLayer.LAST, HighlighterTargetArea.LINES_IN_RANGE,
             ).apply { gutterIconRenderer = Plus(editor, newLine) }
@@ -151,10 +166,12 @@ object NoteGutter {
         override fun getClickAction(): AnAction = object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) {
                 val project = editor.project ?: return
-                val real = realLine(editor, line).takeIf { it >= 0 } ?: return
+                val direct = realLine(editor, line)
+                val deleted = if (direct < 0) deletedTarget(editor, line) ?: return else null
+                val real = if (direct >= 0) direct else deleted!!.first
                 val doc = document(editor)
                 editor.getUserData(KEY)?.hide()
-                NotePopup.show(project, editor, line, null, target = if (doc === editor.document) null else doc to real)
+                NotePopup.show(project, editor, line, null, target = if (doc === editor.document) null else doc to real, deleted = deleted?.second)
             }
         }
         override fun equals(other: Any?) = other is Plus && other.editor === editor && other.line == line

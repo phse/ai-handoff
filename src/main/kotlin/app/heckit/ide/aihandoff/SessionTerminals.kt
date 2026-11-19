@@ -38,6 +38,19 @@ object SessionTerminals {
 
     fun isOpen(project: Project, tab: String): Boolean = guard("isOpen") { bridge(project).isOpen(tab) } ?: false
 
+    /**
+     * Terminal-Reiter übernehmen, in dessen Shell der Prozess [pid] (Claude Code) läuft. [keep] wie bei [adopt]; ein Reiter
+     * von Handoff behält seine Kennung (`HANDOFF_TAB`). Auf dem EDT.
+     */
+    fun adoptByPid(project: Project, pid: Long, keep: String? = null): String? = guard("adoptByPid") { bridge(project).adoptByPid(pid, keep) }
+
+    /** Terminal-Reiter, zu dem die Aktion gerade gehört (Kontextmenü des Terminals): Prozess der Shell, oder null. */
+    fun shellPidOf(e: com.intellij.openapi.actionSystem.AnActionEvent): Long? = guard("shellPid") { TerminalApi.shellPidOf(e) }
+
+    /** [pid] und seine Elternprozesse (bis 6 Stufen) - Claude Code läuft direkt oder über einen Starter in der Shell. */
+    fun ancestors(pid: Long): Set<Long> =
+        generateSequence(ProcessHandle.of(pid).orElse(null)) { it.parent().orElse(null) }.take(6).map { it.pid() }.toSet()
+
     /** Irgendein von Handoff gestarteter Reiter offen (ohne EDT, nur für die Abfragehäufigkeit). */
     /** Reiter [tab] hat Handoff in diesem Projekt gestartet (ohne EDT). */
     fun knows(project: Project, tab: String): Boolean = available && project.getServiceIfCreated(TerminalBridge::class.java)?.knows(tab) == true
@@ -60,11 +73,13 @@ object SessionTerminals {
     /**
      * Einen Terminal-Reiter übernehmen, den Handoff nicht selbst gestartet hat: den, dessen Ausgabe [ref] enthält. Die Ausgabe
      * erscheint erst kurz nach dem Hook - deshalb einige Versuche. [found] bekommt die neue Kennung des Reiters.
+     * [keep]: bisherige Kennung weiterverwenden - nach einem Plugin-Update kennt Handoff seine eigenen Reiter nicht mehr,
+     * der Hook schreibt aber weiter die alte Kennung (`HANDOFF_TAB`) in die `.tab`-Datei (2026-11-18).
      */
-    fun adopt(project: Project, ref: String, tries: Int = 8, found: (String) -> Unit) {
-        val id = guard("adopt") { bridge(project).adopt(ref) }
+    fun adopt(project: Project, ref: String, keep: String? = null, tries: Int = 8, found: (String) -> Unit) {
+        val id = guard("adopt") { bridge(project).adopt(ref, keep) }
         if (id != null) { found(id); return }
-        if (tries > 1) javax.swing.Timer(500) { adopt(project, ref, tries - 1, found) }.apply { isRepeats = false; start() }
+        if (tries > 1) javax.swing.Timer(500) { adopt(project, ref, keep, tries - 1, found) }.apply { isRepeats = false; start() }
     }
 
     /** Normales Terminal (ohne Claude) in einem Ordner. */
@@ -144,18 +159,37 @@ class TerminalBridge(private val project: Project) {
         return id
     }
 
-    fun adopt(ref: String): String? {
+    fun adopt(ref: String, keep: String? = null): String? {
         // Nur das Ende der Ausgabe - die Kennung ist gerade erst erschienen.
         val tab = TerminalApi.tabs(project).firstOrNull { t -> TerminalApi.outputTails(t, 20_000L).any { it.text.contains(ref) } } ?: return null
         tabs.entries.firstOrNull { it.value == tab }?.let { return it.key }
-        val id = UUID.randomUUID().toString()
+        val id = keep ?: UUID.randomUUID().toString()
+        tabs[id] = tab
+        return id
+    }
+
+    /**
+     * Eigenen Reiter wiedererkennen: Nach einem Plugin-Update ohne Neustart ist [tabs] leer, die Reiter laufen aber weiter -
+     * ihre Umgebung trägt noch `HANDOFF_TAB` (2026-11-18 stand der Session-Reiter sonst auf "Terminal closed").
+     */
+    private fun recover(id: String): Any? {
+        val tab = TerminalApi.tabs(project).firstOrNull { TerminalApi.handoffId(it) == id } ?: return null
+        tabs[id] = tab
+        return tab
+    }
+
+    fun adoptByPid(pid: Long, keep: String?): String? {
+        val chain = SessionTerminals.ancestors(pid)
+        val tab = TerminalApi.tabs(project).firstOrNull { t -> TerminalApi.shellPid(t)?.let { it in chain } == true } ?: return null
+        tabs.entries.firstOrNull { it.value == tab }?.let { return it.key }
+        val id = TerminalApi.handoffId(tab) ?: keep ?: UUID.randomUUID().toString()
         tabs[id] = tab
         return id
     }
 
     /** Muss auf dem EDT laufen (Liste der Reiter). Geschlossene Reiter fallen dabei aus der Liste. */
     fun isOpen(id: String): Boolean {
-        val tab = tabs[id] ?: return false
+        val tab = tabs[id] ?: recover(id) ?: return false
         if (tab in TerminalApi.tabs(project)) return true
         tabs.remove(id)
         return false
@@ -208,9 +242,15 @@ class TerminalBridge(private val project: Project) {
         TerminalApi.close(project, tab)
     }
 
+    /**
+     * Als eigener Titel des Reiters (wie „Rename Session“), nicht als Anzeigename: Claude Code setzt den Terminal-Titel
+     * laufend (mit drehendem Zeichen davor), das Terminal übernahm ihn als Anzeigename, Handoff setzte ihn jede Sekunde
+     * zurück - der Reiter flackerte und die Reiterleiste sprang hin und her (2026-11-19, Bildschirmaufnahme). Ein eigener
+     * Titel hat Vorrang vor dem der Anwendung.
+     */
     fun rename(id: String, name: String) {
-        val content = tabs[id]?.takeIf { isOpen(id) }?.let { TerminalApi.content(it) } ?: return
-        if (content.displayName != name) content.displayName = name
+        val tab = tabs[id]?.takeIf { isOpen(id) } ?: return
+        TerminalApi.rename(tab, name)
     }
 
     fun show(id: String) {
@@ -245,10 +285,31 @@ private object TerminalApi {
 
     fun content(tab: Any): com.intellij.ui.content.Content = (tab as TerminalToolWindowTab).content
 
+    fun rename(tab: Any, name: String) {
+        val title = (tab as TerminalToolWindowTab).view.title
+        if (title.userDefinedTitle != name) title.change { userDefinedTitle = name }
+    }
+
     fun send(tab: Any, text: String, execute: Boolean) {
         val builder = (tab as TerminalToolWindowTab).view.createSendTextBuilder()
         (if (execute) builder.shouldExecute() else builder).send(text)
     }
+
+    /** Start-Daten der Shell; erst da, wenn sie läuft - nicht darauf warten. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun startup(view: com.intellij.terminal.frontend.view.TerminalView): org.jetbrains.plugins.terminal.session.TerminalStartupOptions? {
+        val d = view.startupOptionsDeferred
+        return if (d.isCompleted) runCatching { d.getCompleted() }.getOrNull() else null
+    }
+
+    /** Kennung, mit der Handoff den Reiter gestartet hat (Umgebungsvariable `HANDOFF_TAB`), sonst null. */
+    fun handoffId(tab: Any): String? = startup((tab as TerminalToolWindowTab).view)?.envVariables?.get("HANDOFF_TAB")
+
+    /** Prozess der Shell im Reiter (lokales Terminal), sonst null. */
+    fun shellPid(tab: Any): Long? = startup((tab as TerminalToolWindowTab).view)?.pid
+
+    fun shellPidOf(e: com.intellij.openapi.actionSystem.AnActionEvent): Long? =
+        e.getData(com.intellij.terminal.frontend.view.TerminalView.DATA_KEY)?.let { startup(it)?.pid }
 
     /** Die letzten [chars] Zeichen der normalen und der alternativen Ausgabe (in dieser Reihenfolge). */
     fun outputTails(tab: Any, chars: Long): List<TerminalTail> {

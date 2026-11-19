@@ -28,10 +28,15 @@
       needs your input. Read the full message in an editor tab and type your next prompt right into the card.</li>
   <li><b>Claude sessions in editor tabs</b>: start Claude Code from the IDE and work with it in an editor tab, the
       conversation formatted, prompts and slash commands sent to the terminal in the background. <code>/show-in-editor</code>
-      opens a running session there.</li>
+      opens a running session there, <b>Open in Handoff</b> in the terminal's menu shows the session of that tab, and
+      <b>↶</b> next to a prompt rewinds to before it.</li>
   <li><b>Session logs (.jsonl)</b>: Claude Code's transcripts open as a readable conversation instead of raw JSON (switch
       to <i>Text</i> at the bottom), with tool steps, errors and changed files; resume one in a new tab or export it as Markdown.</li>
   <li><b>Questions with options</b>: Claude asks as a card, one answer or several, plus your own answer.</li>
+  <li><b>Checklists for manual tests</b>: the steps to try by hand as a card, each with a checkbox and a note; the results
+      go back to Claude in one go.</li>
+  <li><b>Secrets</b>: type a password or token into a card; Handoff writes it into the file (e.g. <code>.env</code>) and Claude
+      never sees it.</li>
   <li><b>Notifications</b> when something is waiting while the IDE is in the background.</li>
   <li><b>Images to review or choose from</b>: one image to approve, or several variants to pick one. A viewer with zoom and paging
       lets you mark areas with a frame and a note for Claude, or draw on the image with a pen or arrows.</li>
@@ -44,7 +49,7 @@
 <h3>Setup</h3>
 <ul>
   <li>Enable the IDE's MCP server (<b>Settings | Tools | MCP Server</b>) and connect Claude Code to it.</li>
-  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_propose_sequence</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_ask</code>, <code>handoff_request_review</code>, <code>handoff_get_notes</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
+  <li>Claude Code then sees the tools <code>handoff_propose_command</code>, <code>handoff_propose_sequence</code>, <code>handoff_wait_for_result</code>, <code>handoff_show_images</code>, <code>handoff_ask</code>, <code>handoff_checklist</code>, <code>handoff_request_secret</code>, <code>handoff_request_review</code>, <code>handoff_get_notes</code>, <code>handoff_begin_task</code> and <code>handoff_end_task</code>.</li>
   <li>Tell Claude when to use them: the empty <i>Commands</i> tab copies a ready-made snippet for your <code>CLAUDE.md</code>.</li>
   <li>The built-in guide (<b>Guide</b> in the tool window's ⋮ menu) lists the setup and a prompt per feature.</li>
 </ul>
@@ -110,7 +115,16 @@
                 description="Save this Claude Code session (prompts, answers, tool steps) as a Markdown file">
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
         </action>
+        <action id="Handoff.OpenInHandoff" class="app.heckit.ide.aihandoff.OpenInHandoffAction" text="Open in Handoff"
+                description="Show the Claude Code session of this terminal tab in a Handoff editor tab">
+            <add-to-group group-id="Terminal.ReworkedTerminalContextMenu" anchor="first"/>
+        </action>
     </actions>
+    <projectListeners>
+        <!-- Datei aus einem Session-Reiter geschlossen: zurück zum Session-Reiter (IDE-Verlauf kennt ihn nicht). -->
+        <listener class="app.heckit.ide.aihandoff.SessionTabReturn" topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+        <listener class="app.heckit.ide.aihandoff.SessionTabReturn" topic="com.intellij.openapi.fileEditor.FileEditorManagerListener$Before"/>
+    </projectListeners>
     <applicationListeners>
         <listener class="app.heckit.ide.aihandoff.UnloadCleanup" topic="com.intellij.ide.plugins.DynamicPluginListener"/>
     </applicationListeners>

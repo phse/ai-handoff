@@ -48,6 +48,30 @@ data class AskQuestion(
     val answered get() = picked.isNotEmpty() || own.isNotBlank()
 }
 
+/** Ein Schritt einer Prüfliste (handoff_checklist); auch MCP-Parameter. */
+@kotlinx.serialization.Serializable
+data class CheckItem(
+    @com.intellij.mcpserver.annotations.McpDescription("What the user should do or check, one step. Markdown is rendered.")
+    val step: String,
+    @com.intellij.mcpserver.annotations.McpDescription("Optional: what should happen when it works.")
+    val expected: String = "",
+) {
+    /**
+     * Nur Oberfläche bzw. Ergebnis: 0 offen, 1 geht (abgehakt), 2 geht nicht - beim Senden für nicht abgehakte Schritte mit
+     * Notiz gesetzt. [noteOpen]: Notizfeld per Sprechblase aufgeklappt, [focusNote]: es nach dem Neubau gleich fokussieren.
+     */
+    @kotlinx.serialization.Transient @Volatile var result: Int = 0
+    @kotlinx.serialization.Transient @Volatile var note: String = ""
+    @kotlinx.serialization.Transient @Volatile var noteOpen: Boolean = false
+    @kotlinx.serialization.Transient @Volatile var focusNote: Boolean = false
+}
+
+/** Geheimnis, das der Nutzer eintippt und das Plugin in eine Datei schreibt (handoff_request_secret). */
+class SecretRequest(val file: java.io.File, val key: String) {
+    /** Ergebnis für Claude, ohne den Wert. */
+    @Volatile var outcome: String? = null
+}
+
 /** Ein von der KI vorgeschlagener Befehl, den der Nutzer selbst ausführt. */
 class Proposal(
     val id: String,
@@ -66,6 +90,10 @@ class Proposal(
     val steps: List<Step> = emptyList(),
     /** Fragen mit Auswahl (dann ist [command] leer und [reason] die Überschrift). */
     val questions: List<AskQuestion> = emptyList(),
+    /** Prüfliste für einen Handtest (dann ist [command] leer und [reason] die Überschrift). */
+    val checks: List<CheckItem> = emptyList(),
+    /** Geheimnis eingeben (dann ist [command] leer und [reason] die Beschreibung). */
+    val secret: SecretRequest? = null,
 ) {
     enum class State { PENDING, RUNNING, FINISHED, DISMISSED }
 
@@ -80,6 +108,7 @@ class Proposal(
     @Volatile var selected: Int? = null
     @Volatile var noteDraft: String = ""
     val isAsk get() = questions.isNotEmpty()
+    val isChecklist get() = checks.isNotEmpty()
     /** Nur Oberfläche: gerade gezeigte Frage. */
     @Volatile var page = 0
     /** Zeilennotizen, die der Nutzer mit der Prüfung zurückgegeben hat (Text für Claude). */
@@ -148,6 +177,17 @@ class Proposal(
                 note?.let { append("\nNote: $it") }
                 lineNotes?.let { append("\nLine notes (path:line, the note, then the line it is attached to):\n").append(it) }
             }
+            Proposal.State.FINISHED if isChecklist -> buildString {
+                val ok = checks.count { it.result == 1 }; val bad = checks.count { it.result == 2 }; val open = checks.size - ok - bad
+                append("checklist done by the user: $ok passed, $bad failed" + (if (open > 0) ", $open not done" else "") + ".")
+                note?.let { append("\nNote: $it") }
+                checks.forEachIndexed { i, c ->
+                    append("\n${i + 1}. ").append(when (c.result) { 1 -> "passed"; 2 -> "FAILED"; else -> "not done" }).append(": ")
+                    append(c.step.lineSequence().first().take(160))
+                    c.note.takeIf { it.isNotBlank() }?.let { append("\n   Note: ").append(it.trim().replace("\n", "\n   ")) }
+                }
+            }
+            Proposal.State.FINISHED if secret != null -> secret.outcome ?: "set."
             Proposal.State.FINISHED if isAsk -> buildString {
                 append("answered by the user.")
                 questions.forEachIndexed { qi, q ->
@@ -241,6 +281,38 @@ class HandoffService(private val project: Project) {
         return p
     }
 
+    fun proposeChecklist(title: String, items: List<CheckItem>): Proposal {
+        val p = Proposal("h${counter.incrementAndGet()}", "", title, "", false, checks = items)
+        add(p)
+        Attention.notify(project, "Claude asks you to test ${items.size} step${if (items.size == 1) "" else "s"}", title.ifBlank { Md.plain(items.first().step) })
+        fireChanged()
+        return p
+    }
+
+    fun proposeSecret(label: String, file: java.io.File, key: String): Proposal {
+        val p = Proposal("h${counter.incrementAndGet()}", "", label, file.parent.orEmpty(), false, secret = SecretRequest(file, key))
+        add(p)
+        Attention.notify(project, "Claude asks you to enter a secret", label)
+        fireChanged()
+        return p
+    }
+
+    /** Wert in die Datei schreiben; Claude bekommt nur, wohin und ob die Datei von Git ignoriert wird. */
+    fun saveSecret(p: Proposal, value: CharArray) {
+        val r = p.secret ?: return
+        try {
+            r.outcome = Secrets.write(r.file, r.key, String(value))
+            p.state = Proposal.State.FINISHED
+        } catch (e: Exception) {
+            p.note = "Could not write ${r.file.path}: ${e.message}"
+            p.state = Proposal.State.DISMISSED
+        } finally {
+            value.fill(' ')
+        }
+        p.done.complete(Unit)
+        fireChanged()
+    }
+
     /** Fragen beantworten: Antworten stehen in [AskQuestion.picked] und [AskQuestion.own]. */
     fun answer(p: Proposal) {
         p.state = Proposal.State.FINISHED
@@ -284,7 +356,9 @@ class HandoffService(private val project: Project) {
     private fun add(p: Proposal) {
         val sessions = WaitingSessions.getInstance(project)
         // Fragen von Claude Code beantwortet der Hook selbst - nichts nachzustellen.
-        if (p.askSession == null) {
+        val caller = if (p.askSession == null) runCatching { Callers.find(p) }.getOrNull() else null
+        if (caller != null) { p.session = caller; p.sessionSure = true }
+        else if (p.askSession == null) {
             // Arbeiten mehrere Sessions, die eingrenzen, in deren Ordner die Pfade der Karte liegen (Bilder, Arbeitsordner);
             // der tiefste passende Ordner gewinnt, wenn er eindeutig ist.
             val working = sessions.working
@@ -293,7 +367,9 @@ class HandoffService(private val project: Project) {
             val fitting = if (working.size > 1 && paths.isNotEmpty()) working.filter { under(it.cwd) } else working
             val deepest = fitting.maxOfOrNull { it.cwd.length }?.let { len -> fitting.filter { it.cwd.length == len } }.orEmpty()
             p.session = deepest.singleOrNull()?.id ?: working.maxByOrNull { it.since }?.id
-            p.sessionSure = deepest.size == 1
+            // Ohne Pfade (Fragen, Reviews) sagt der Ordner nichts: Mit mehreren arbeitenden Sessions gewann sonst die mit dem
+            // tiefsten Arbeitsordner, und die späte Antwort auf eine Frage landete in einer fremden Session (2026-11-18).
+            p.sessionSure = deepest.size == 1 && (working.size == 1 || paths.isNotEmpty())
         }
         proposals.add(0, p)
         p.done.invokeOnCompletion {
