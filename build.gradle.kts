@@ -69,6 +69,22 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.11.0</h3>
+            <ul>
+              <li><b>Sessions</b> tab: every Claude Code session of the project with its state (waiting, working, done), title,
+                  folder, model, context use and running task; <b>Show in Editor</b> / <b>Open in Editor</b> and
+                  <b>Show Terminal</b> per session.</li>
+              <li>One task per session: several sessions in the same project each keep their own changelist. Files a session
+                  changes with Edit or Write go to its changelist, even while another task's changelist is active; a session
+                  ends and reviews only its own task.</li>
+              <li>Remote Control button (globe) in the session tab runs <code>/remote-control</code> and turns blue while
+                  the session is connected.</li>
+              <li><b>Copy</b> for code blocks and whole messages in the session tab, and on command cards for running a
+                  command yourself.</li>
+              <li>Fixes: a late result is never handed to Claude twice; resuming a session keeps its tab in place; a review
+                  from a session without a task leaves out the other sessions' tasks; a Claude Code started from inside a
+                  session (by a script or tool) no longer takes over that session's tab.</li>
+            </ul>
             <h3>1.10.0</h3>
             <ul>
               <li>Checklists for manual tests (<code>handoff_checklist</code>): each step with a checkbox and a note, the

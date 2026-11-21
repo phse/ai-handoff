@@ -84,6 +84,8 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
             val n = HandoffService.getInstance(project).pendingCount
             content.displayName = if (n > 0) "Commands ($n)" else "Commands"
         }, panel)
+        val sessionsPanel = SessionsPanel(project)
+        toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(sessionsPanel, "Sessions", false).apply { setDisposer(sessionsPanel) })
         val memory = MemoryPanel(project)
         toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(memory, "Memory", false).apply { setDisposer(memory) })
         val usage = UsagePanel(project)
@@ -142,7 +144,7 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
             com.intellij.openapi.actionSystem.Separator.create(),
         ))
         fun selected() = toolWindow.contentManager.selectedContent?.component
-        fun isMemory() = selected() === memory || selected() === usage
+        fun isMemory() = selected() === memory || selected() === usage || selected() === sessionsPanel
         toolWindow.setTitleActions(listOf(
             newSession,
             // Mülleimer als Menü: erledigte Übergaben oder alle „Claude is done/waiting“-Karten entfernen.
@@ -167,7 +169,11 @@ class HandoffToolWindowFactory : ToolWindowFactory, DumbAware {
             object : AnAction("Reload", null, AllIcons.Actions.Refresh), DumbAware {
                 override fun update(e: AnActionEvent) { e.presentation.isVisible = isMemory() }
                 override fun getActionUpdateThread() = com.intellij.openapi.actionSystem.ActionUpdateThread.EDT
-                override fun actionPerformed(e: AnActionEvent) = if (selected() === usage) usage.refresh() else memory.refresh()
+                override fun actionPerformed(e: AnActionEvent) = when {
+                    selected() === usage -> usage.refresh()
+                    selected() === sessionsPanel -> sessionsPanel.refresh()
+                    else -> memory.refresh()
+                }
             },
         ))
     }
@@ -204,6 +210,19 @@ internal fun JButton.primary() = com.intellij.ui.ClientProperty.put(this, com.in
 
 /** Verwerfen-Knopf schlicht mit Kreuz, damit er sich ohne Lesen vom Hauptknopf unterscheidet. */
 internal fun dismissButton(text: String) = JButton(text, AllIcons.Actions.Close)
+
+/**
+ * Befehl in die Zwischenablage, falls man ihn lieber selbst ausführt; die Karte bleibt offen (danach etwa mit Notiz
+ * verwerfen). [text] liest den Stand beim Klick, also auch Änderungen im Feld.
+ */
+internal fun copyButton(tooltip: String, text: () -> String) = JButton("Copy", AllIcons.Actions.Copy).apply {
+    toolTipText = tooltip
+    addActionListener {
+        com.intellij.openapi.ide.CopyPasteManager.getInstance().setContents(java.awt.datatransfer.StringSelection(text()))
+        this.text = "Copied"
+        javax.swing.Timer(1500) { this.text = "Copy" }.apply { isRepeats = false; start() }
+    }
+}
 
 internal class HandoffPanel(private val project: Project, private val compact: Boolean = false, private val sessionOf: (() -> String?)? = null, private val onNewCard: (() -> Unit)? = null) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
     private val service = HandoffService.getInstance(project)
@@ -249,6 +268,12 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         // Nicht in Screenshot-Läufen: Dort gilt die Sandbox als "gerade aktualisiert".
         if (!compact && System.getProperty("handoff.screenshots") == null) Guide.pendingNews()?.let { (version, news) -> add(newsBanner(version, news), BorderLayout.NORTH) }
         service.addListener({ rebuild() }, this)
+        // Session-Reiter geöffnet oder geschlossen: Karten wechseln zwischen "Open in Editor" und "Show in Editor".
+        if (!compact) project.messageBus.connect(this).subscribe(com.intellij.openapi.fileEditor.FileEditorManagerListener.FILE_EDITOR_MANAGER,
+            object : com.intellij.openapi.fileEditor.FileEditorManagerListener {
+                override fun fileOpened(source: com.intellij.openapi.fileEditor.FileEditorManager, file: com.intellij.openapi.vfs.VirtualFile) { if (file is SessionFile) rebuild() }
+                override fun fileClosed(source: com.intellij.openapi.fileEditor.FileEditorManager, file: com.intellij.openapi.vfs.VirtualFile) { if (file is SessionFile) SwingUtilities.invokeLater { rebuild() } }
+            })
         rebuild()
     }
 
@@ -316,7 +341,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val top = Layout.newestOnTop
         val ws = project.getServiceIfCreated(WaitingSessions::class.java)
         fun waitKey(w: WaitingSession): Any = listOf("w", w.id, w.at, w.finished, w.listening, w.text, SessionEditors.openTab(project, ws?.infos?.get(w.id)?.tab, w.id) != null)
-        fun workKey(w: WorkingSession): Any = listOf("k", w.id, w.since, w.prompt)
+        fun workKey(w: WorkingSession): Any = listOf("k", w.id, w.since, w.prompt, SessionEditors.openTab(project, ws?.infos?.get(w.id)?.tab, w.id) != null)
         val entries = mutableListOf<Pair<Any, () -> JComponent>>()
         val proposals = service.proposals.filter { !it.hidden }
         if (proposals.isEmpty() && notes.isEmpty() && ((waiting.isEmpty() && working.isEmpty()) || pin))
@@ -533,7 +558,8 @@ internal class HandoffPanel(private val project: Project, private val compact: B
 
     private fun changes(p: Proposal): List<com.intellij.openapi.vcs.changes.Change> {
         val clm = com.intellij.openapi.vcs.changes.ChangeListManager.getInstance(project)
-        val list = p.changelist?.let { clm.findChangeList(it)?.changes } ?: clm.allChanges
+        val list = p.changelist?.let { clm.findChangeList(it)?.changes }
+            ?: clm.allChanges.filter { p.excludeLists.isEmpty() || clm.getChangeList(it)?.name !in p.excludeLists }
         return list.sortedBy { (it.afterRevision ?: it.beforeRevision)?.file?.path.orEmpty() }
     }
 
@@ -685,12 +711,9 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
             val (preview, cut) = Md.preview(s.text)
             if (preview.isNotEmpty()) add(markdown(preview))
-            if (linked) add(link("Show in Editor") { SessionEditors.open(project, sessions.infos[s.id]?.tab, s.id) })
-            else {
-                // Die ganze Nachricht in einem Editor-Reiter: breiter, von oben nach unten lesbar, Markdown gerendert.
-                if (cut) add(link("Open Full Message") { Md.openMessage(project, time.format(Date(s.at)), s.text) })
-                add(link("Open in Editor") { SessionEditors.open(project, sessions.infos[s.id]?.tab, s.id) })
-            }
+            // Ohne Session-Reiter: die ganze Nachricht in einem Editor-Reiter - breiter, von oben nach unten lesbar, Markdown gerendert.
+            if (!linked && cut) add(link("Open Full Message") { Md.openMessage(project, time.format(Date(s.at)), s.text) })
+            add(sessionLink(s.id))
             val base = project.basePath.orEmpty().trimEnd('/')
             if (s.cwd != base) add(grey(if (s.cwd.startsWith("$base/")) s.cwd.removePrefix("$base/") else SessionEditors.shortPath(s.cwd)))
         }, BorderLayout.CENTER)
@@ -735,6 +758,16 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         return hoverClose(card, "Dismiss") { sessions.dismiss(s) }
     }
 
+    /**
+     * Weg zum Session-Reiter, überall gleich benannt: "Show in Editor", wenn es den Reiter schon gibt (holt ihn nach vorn),
+     * sonst "Open in Editor" (öffnet einen neuen).
+     */
+    private fun sessionLink(id: String): JComponent {
+        val tab = WaitingSessions.getInstance(project).infos[id]?.tab
+        val open = SessionEditors.openTab(project, tab, id) != null
+        return link(if (open) "Show in Editor" else "Open in Editor") { SessionEditors.open(project, tab, id) }
+    }
+
     /** Prompt aus einer Karte an die Session; Slash-Befehle gehen nur über ein von Handoff gestartetes Terminal. */
     private fun send(s: WaitingSession, input: JBTextArea) {
         val sessions = WaitingSessions.getInstance(project)
@@ -763,7 +796,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false
             Md.preview(w.prompt.removePrefix("The user sent this follow-up prompt from the IDE (Handoff tool window):").trim(), maxLines = 2, maxChars = 160)
                 .first.takeIf { it.isNotEmpty() }?.let { add(grey(Md.plain(it))) }
-            add(link("Open in Editor") { SessionEditors.open(project, sessions.infos[w.id]?.tab, w.id) })
+            add(sessionLink(w.id))
         }, BorderLayout.CENTER)
         card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
             isOpaque = false
@@ -813,7 +846,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val next = JButton(if (last) "Submit" else "Next").apply { primary() }
         fun updateNext() { next.isEnabled = q.answered }
         body.add(markdown(q.question + if (q.multiSelect) "\n\n*Pick any.*" else ""))
-        if (q.question.lines().size > 12) body.add(link("Open in Editor") { Md.openMessage(project, "Question " + time.format(Date(p.createdAt)), q.question) })
+        if (q.question.lines().size > 12) body.add(link("Open Full Question") { Md.openMessage(project, "Question " + time.format(Date(p.createdAt)), q.question) })
         body.add(Box.createVerticalStrut(JBUI.scale(6)))
         val group = javax.swing.ButtonGroup()
         q.options.forEachIndexed { i, o ->
@@ -1062,6 +1095,12 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 toolTipText = "Runs only the next step"
                 addActionListener { start(false) }
             }
+            // Ausstehende Schritte mit && verbunden: Wie beim Ablauf stoppt die Shell beim ersten Fehler.
+            val copy = copyButton("Copies the remaining steps, joined with &&, to run them yourself") {
+                p.steps.filter { it.exitCode == null }.joinToString(" && \\\n") { s ->
+                    fields.firstOrNull { it.first === s }?.second?.text?.trim()?.takeIf { it.isNotEmpty() } ?: s.command
+                }
+            }
             val dismiss = dismissButton("Dismiss…").apply {
                 addActionListener {
                     val note = Messages.showInputDialog(project, "Optional note for Claude:", "Dismiss Commands", null)
@@ -1070,7 +1109,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             }
             card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                 isOpaque = false
-                listOf(all, one, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
+                listOf(all, one, copy, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
             }, BorderLayout.SOUTH)
         }
         return card
@@ -1135,6 +1174,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                 addActionListener { start(CommandRunner::run) }
             }
             run.primary()
+            val copy = copyButton("Copies the command to run it yourself") { command.text.trim() }
             val dismiss = dismissButton("Dismiss…").apply {
                 addActionListener {
                     val note = Messages.showInputDialog(project, "Optional note for Claude:", "Dismiss Command", null)
@@ -1143,7 +1183,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
             }
             card.add(JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
                 isOpaque = false
-                listOf(run, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
+                listOf(run, copy, dismiss).forEachIndexed { i, b -> if (i > 0) add(Box.createHorizontalStrut(JBUI.scale(6))); add(b) }
             }, BorderLayout.SOUTH)
         }
         // Höhe begrenzen (sonst streckt die Liste die Karte), aber nach jeder Breitenänderung neu: Der umbrechende Befehl wird

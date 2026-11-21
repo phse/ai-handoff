@@ -4,6 +4,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -308,7 +309,19 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
     fun workingOn(id: String?) = id?.let { i -> working.firstOrNull { it.id == i } }
 
     /** Neueste Session, die in diesem Terminal-Reiter läuft (nach `/clear` beginnt dort eine neue). */
-    fun sessionOfTab(tab: String): SessionInfo? = infos.values.filter { it.tab == tab }.maxByOrNull { it.at }
+    fun sessionOfTab(tab: String): SessionInfo? {
+        val candidates = infos.values.filter { it.tab == tab }
+        if (candidates.size < 2) return candidates.firstOrNull()
+        // Ein Claude, das aus einer Session heraus startet (Bash-Werkzeug → Skript, Gradle-Sandbox, die Claude Code
+        // prüft …), erbt `HANDOFF_TAB` und meldet denselben Reiter. Es gehört nicht dazu: Sein Prozess läuft unter dem
+        // Claude der Session. Ebenso nicht mehr laufende Prozesse. Sonst sprang der Reiter auf eine leere fremde Session
+        // (Screenshot-Lauf, 2026-11-22).
+        val alive = candidates.filter { c -> c.pid == null || ProcessHandle.of(c.pid).map { it.isAlive }.orElse(false) }.ifEmpty { candidates }
+        val pids = alive.mapNotNull { it.pid }.toSet()
+        fun nested(c: SessionInfo) = c.pid != null &&
+            generateSequence(ProcessHandle.of(c.pid).orElse(null)?.parent()?.orElse(null)) { it.parent().orElse(null) }.take(40).any { it.pid() in pids && it.pid() != c.pid }
+        return alive.filterNot(::nested).ifEmpty { alive }.maxByOrNull { it.at }
+    }
 
     /**
      * Weiterer Prompt für eine Session. Läuft sie in einem Terminal-Reiter, den Handoff gestartet hat, geht der Text dorthin -
@@ -317,6 +330,10 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
      */
     fun reply(id: String, prompt: String): Boolean {
         val text = prompt.trim().takeIf { it.isNotEmpty() } ?: return false
+        if (HandoffService.getInstance(project).alreadyDelivered(text)) {
+            logger<WaitingSessions>().warn("Handoff: late result sent again blocked (reply to $id): ${text.take(40)}", Throwable("origin"))
+            return true
+        }
         val tab = infos[id]?.tab
         if (tab != null && SessionTerminals.send(project, tab, text)) {
             drafts.remove(id)

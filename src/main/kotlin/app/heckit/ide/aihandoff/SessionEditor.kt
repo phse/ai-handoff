@@ -300,8 +300,13 @@ object SessionEditors {
         // Ein Prompt geht als Argument mit: `claude --resume <id> "<prompt>"` schickt ihn gleich nach dem Start ab.
         val arg = prompt?.trim()?.takeIf { it.isNotEmpty() }?.let { " '" + it.replace("'", "'\\''") + "'" }.orEmpty()
         val tab = SessionTerminals.start(project, "claude --resume $sessionId$arg", dir) ?: return
+        // Erst den neuen Reiter öffnen (landet neben dem alten und ist vorn), dann den alten schließen. Andersherum sprang
+        // nach dem Schließen der Nachbar-Reiter einer anderen Session nach vorn, und der neue landete am Ende (2026-11-22).
+        // Session, Protokoll und Titel gleich mitgeben - sonst bleibt der Reiter leer, bis der Hook der Session meldet.
+        val fresh = SessionFile(tab, sessionId, restoredTranscript = file.transcript, restoredTitle = file.title, restoredCwd = dir)
+        OpenFileDescriptor(project, fresh).navigate(true)
         FileEditorManager.getInstance(project).closeFile(file)
-        open(project, tab, null, cwd = dir)
+        com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
     }
 
     private const val KEY = "app.heckit.ide.aihandoff.sessionTabs"
@@ -668,6 +673,9 @@ class Transcript(val path: String) {
     var title: String? = null
     /** Per /rename gesetzt: gilt vor dem automatischen Titel, auch vor später geschriebenen ai-title-Zeilen. */
     private var customTitle = false
+    /** Remote Control verbunden - letzter `bridge-session`-Eintrag mit Kennung (leer = getrennt), siehe [TranscriptMeta.Info.remote]. */
+    @Volatile var remote = false
+        private set
     /** Letzter Werkzeugaufruf ungekürzt (Name und Befehl bzw. Datei) - zeigt bei einer Freigabe, worum es geht. */
     var lastTool: String? = null
         private set
@@ -710,7 +718,7 @@ class Transcript(val path: String) {
         val file = File(path)
         if (!file.isFile) return false
         val length = file.length()
-        if (length < offset) { offset = 0; entries.clear(); background.clear(); toolLines.clear(); toolEntries.clear(); order.clear(); parents.clear(); messages.clear() }
+        if (length < offset) { offset = 0; remote = false; entries.clear(); background.clear(); toolLines.clear(); toolEntries.clear(); order.clear(); parents.clear(); messages.clear() }
         if (length == offset) return false
         val bytes = RandomAccessFile(file, "r").use { raf ->
             raf.seek(offset)
@@ -719,9 +727,9 @@ class Transcript(val path: String) {
         val end = bytes.lastIndexOf('\n'.code.toByte())
         if (end < 0) return false
         offset += end + 1
-        val before = Triple(entries.size, title, background.keys.toList())
+        val before = listOf(entries.size, title, background.keys.toList(), remote)
         String(bytes, 0, end, Charsets.UTF_8).lineSequence().forEach { line -> if (line.isNotBlank()) runCatching { parse(JsonParser.parseString(line).asJsonObject) } }
-        return Triple(entries.size, title, background.keys.toList()) != before
+        return listOf(entries.size, title, background.keys.toList(), remote) != before
     }
 
     private fun JsonObject.str(k: String) = get(k)?.takeIf { it.isJsonPrimitive }?.asString
@@ -739,6 +747,7 @@ class Transcript(val path: String) {
         when (o.str("type")) {
             "ai-title" -> if (!customTitle) title = o.str("aiTitle") ?: title
             "custom-title" -> o.str("customTitle")?.takeIf { it.isNotBlank() }?.let { title = it; customTitle = true }
+            "bridge-session" -> remote = !o.str("bridgeSessionId").isNullOrEmpty()
             // Während Claude arbeitet abgeschickte Prompts stehen nur als Anhang im Protokoll.
             "attachment" -> {
                 val a = o.getAsJsonObject("attachment") ?: return
@@ -961,6 +970,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
     private var loading = false
     /** Aus diesem Reiter gesendete Prompts, bis sie im Protokoll stehen. */
     private val pending = mutableListOf<String>()
+    /**
+     * Texte hinter den Kopier-Links des aktuellen Verlaufs (Kennung → Text), bei jedem Neuzeichnen neu. Hier oben: Der
+     * Konstruktor zeichnet den Verlauf schon (weiter unten deklariert war das Feld dann noch null, Sandbox 2026-11-21).
+     */
+    private val copyTexts = HashMap<String, String>()
     /** Zahl der Prompts im Protokoll, als der älteste vorgemerkte abgeschickt wurde. */
     private var pendingBase = 0
     /** Davon per Ctrl+Enter sofort gesendet. */
@@ -996,6 +1010,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
             kit.styleSheet.addRule(".summary { color: $grey; margin-left: 14px; }")
             kit.styleSheet.addRule(".divider { color: $grey; text-align: center; margin-top: 8px; margin-bottom: 8px; }")
             kit.styleSheet.addRule(".pending { color: $grey; }")
+            kit.styleSheet.addRule(".copyline { font-size: 90%; margin-top: 0; margin-bottom: 2px; }")
+            kit.styleSheet.addRule("a.copy { color: $grey; text-decoration: none; }")
             kit.styleSheet.addRule(".time { color: $grey; font-size: 90%; padding: 0 0 0 ${JBUI.scale(12)}px; text-align: right; vertical-align: top; }")
             kit.styleSheet.addRule("td.prompt { padding: 0; vertical-align: top; }")
         }
@@ -1013,6 +1029,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 return@addHyperlinkListener
             }
             if (link.startsWith(REWIND_LINK)) { rewind(link.removePrefix(REWIND_LINK)); return@addHyperlinkListener }
+            if (link.startsWith(COPY_LINK)) {
+                copyTexts[link.removePrefix(COPY_LINK)]?.let { text ->
+                    com.intellij.openapi.ide.CopyPasteManager.getInstance().setContents(java.awt.datatransfer.StringSelection(text))
+                    hint.text = "Copied to the clipboard."
+                }
+                return@addHyperlinkListener
+            }
             if (link.startsWith(PROMPT_LINK)) {
                 input.text = java.net.URLDecoder.decode(link.removePrefix(PROMPT_LINK), Charsets.UTF_8)
                 input.requestFocusInWindow(); input.caretPosition = input.document.length
@@ -1535,6 +1558,30 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
 
     /**
+     * Remote Control (`/remote-control`, kurz `/rc`): Session vom Handy oder von claude.ai/code aus steuern. Hervorgehoben,
+     * solange sie verbunden ist; ein Klick öffnet dann den Dialog im Terminal (QR-Code, „Disconnect this session“).
+     */
+    private val remote = SmallButton(null, HandoffIcons.globe()).apply {
+        addActionListener { runCommand("/remote-control") }
+    }
+    private var remoteKey: Pair<Boolean, Boolean>? = null
+
+    private fun updateRemote() {
+        val on = terminalOpen && transcript?.remote == true
+        val key = terminalOpen to on
+        if (key == remoteKey) return
+        remoteKey = key
+        remote.icon = HandoffIcons.globe(on)
+        remote.isSelected = on
+        remote.isEnabled = terminalOpen
+        remote.toolTipText = when {
+            on -> "Remote Control is on - click for the QR code or to disconnect (/remote-control)"
+            terminalOpen -> "Remote Control: control this session from your phone or claude.ai/code (/remote-control)"
+            else -> "Remote Control needs a session running in the IDE terminal"
+        }
+    }
+
+    /**
      * Diktieren (macOS): Feld fokussieren und die Diktierfunktion des Systems starten - dieselbe Aktion wie
      * "Bearbeiten > Diktat starten" (`startDictation:` an die Responder-Kette). Der Text kommt über die Eingabemethode ins Feld.
      */
@@ -1642,9 +1689,19 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
     }
 
+    /**
+     * Öffnet der Befehl im Terminal eine Auswahl? `/remote-control` (`/rc`) nur bei bestehender Verbindung (Dialog mit QR-Code
+     * und „Disconnect this session“); beim Verbinden kommt keine Frage, das Terminal blieb sonst unnötig offen (2026-11-22).
+     */
+    private fun opensDialog(cmd: String): Boolean {
+        val name = cmd.trim().takeIf { it.startsWith("/") }?.removePrefix("/")?.substringBefore(' ')
+        if (name == "remote-control" || name == "rc") return transcript?.remote == true
+        return SlashArguments.opensDialog(cmd)
+    }
+
     private fun runCommand(cmd: String) {
         if (SlashArguments.needsValue(cmd) != null) { askValue(cmd); return }
-        if (SlashArguments.opensDialog(cmd)) file.tab?.let { t -> SwingUtilities.invokeLater { showDialogTerminal(t) } }
+        if (opensDialog(cmd)) file.tab?.let { t -> SwingUtilities.invokeLater { showDialogTerminal(t) } }
         val tab = file.tab ?: return
         if (terminalOpen && SessionTerminals.send(project, tab, cmd)) {
             // Wie beim Senden gleich als Prompt mit "Queued" zeigen - ohne Rückmeldung wirkte ▶ (etwa bei /compact, das
@@ -1745,8 +1802,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 add(JBScrollPane(input).apply { border = JBUI.Borders.customLine(JBColor.border()) }, BorderLayout.CENTER)
                 add(JPanel(BorderLayout(0, JBUI.scale(4))).apply {
                     isOpaque = false
-                    // Mikrofon und "/" nebeneinander über Send, zusammen so breit wie Send.
-                    add(JPanel(java.awt.GridLayout(1, 0, JBUI.scale(4), 0)).apply { isOpaque = false; add(dictate); add(commands) }, BorderLayout.NORTH)
+                    // Mikrofon, Remote Control und "/" nebeneinander über Send.
+                    add(JPanel(java.awt.GridLayout(1, 0, JBUI.scale(4), 0)).apply { isOpaque = false; add(dictate); add(remote); add(commands) }, BorderLayout.NORTH)
                     add(send, BorderLayout.SOUTH)
                 }, BorderLayout.EAST)
             }, BorderLayout.CENTER)
@@ -1787,6 +1844,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
                     pane.editorKit = styledKit()
                     conversation.background = pane.background
                     renderTranscript(force = false)
+                    dictate.icon = HandoffIcons.mic(on = dictating)
+                    remoteKey = null; updateRemote()
                 }
             })
     }
@@ -1864,6 +1923,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
             return
         }
         val shown = input.text.trim().takeIf { it.isNotEmpty() } ?: return
+        // Ein spätes Ergebnis, das Claude schon hat, nicht noch einmal schicken (h12 kam doppelt, 2026-11-18).
+        if (HandoffService.getInstance(project).alreadyDelivered(shown)) {
+            logger<SessionEditor>().warn("Handoff: late result in the input blocked (suggestion=${shown == suggestion}): ${shown.take(40)}")
+            hint.text = "Claude already got this result - it is not sent again."
+            input.text = ""
+            return
+        }
         // /model, /effort ohne Wert öffneten eine unsichtbare Auswahl im Terminal: stattdessen die Werteliste zeigen.
         if (SlashArguments.needsValue(shown) != null) { askValue(shown); return }
         if (resumeFromTab(shown)) return
@@ -1897,7 +1963,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
             if (!file.busy) startedIdle += text
             pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
-            if (tab != null && SlashArguments.opensDialog(text)) showDialogTerminal(tab)
+            if (tab != null && opensDialog(text)) showDialogTerminal(tab)
         }
         else {
             hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
@@ -1981,6 +2047,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         updateState(id)
         updateSuggestion(id)
         updateLimits(id)
+        updateRemote()
     }
 
     private fun updateTabTitle() = runCatching {
@@ -2034,7 +2101,19 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 }
                 html.append("</div>")
             }
-            TranscriptEntry.Kind.ASSISTANT -> html.append(SessionLinks.linkify(promptLinks(Md.document(e.text)), baseDir()))
+            TranscriptEntry.Kind.ASSISTANT -> {
+                // Kopieren: je Codeblock und die ganze Nachricht als Markdown - Markieren im Verlauf nimmt Links und ▶ mit.
+                val code = Md.codeBlocks(e.text)
+                var n = 0
+                val body = PRE.replace(SessionLinks.linkify(promptLinks(Md.document(e.text)), baseDir())) { m ->
+                    val id = "c$key-${n++}"
+                    copyTexts[id] = code.getOrNull(n - 1) ?: StringUtil.unescapeXmlEntities(m.groupValues[2].replace(TAG, ""))
+                    copyLink(id) + m.value
+                }
+                html.append(body)
+                copyTexts["m$key"] = e.text
+                html.append(copyLink("m$key", "Copy message"))
+            }
             TranscriptEntry.Kind.TOOL -> toolHtml(html, e, key)
             TranscriptEntry.Kind.IMAGE -> {
                 val src = File(e.path ?: return).toURI().toString()
@@ -2064,6 +2143,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
             TranscriptEntry.Kind.SUMMARY -> {}
         }
     }
+
+    private fun copyLink(id: String, label: String = "Copy") =
+        "<div class=\"copyline\" align=\"right\"><a class=\"copy\" href=\"$COPY_LINK$id\">⧉ $label</a></div>"
 
     /**
      * Slash-Befehle, die Claude vorschlägt (eigener Absatz oder Code-Spanne, die mit einem bekannten Befehl beginnt, z. B.
@@ -2108,6 +2190,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val atEnd = force || bar.value + bar.visibleAmount >= bar.maximum - JBUI.scale(40)
         val shown = t.entries.takeLast(limit)
         val html = StringBuilder("<html><body>")
+        copyTexts.clear()
         if (t.entries.size > shown.size) (t.entries.size - shown.size).let { n ->
             html.append("<p class=\"note\">$n earlier entries not shown · <a href=\"$MORE_LINK\">Show ${minOf(n, MAX_ENTRIES)} more</a></p>")
         }
@@ -2323,6 +2406,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // sie passen selten zum nächsten Prompt.
         val s = (if (tab != null && done && terminalOpen) SessionTerminals.promptSuggestion(project, tab) else null)
             ?.replace(Regex("""^(?:\[[^\]\n]+]\s*)+"""), "")?.trim()?.takeIf { it.isNotEmpty() }
+            // Ein Ergebnis, das Handoff selbst ins Terminal getippt hat, ist kein Vorschlag von Claude Code.
+            ?.takeUnless { it.startsWith("Result of h") && it.contains("handed over earlier through Handoff") }
         if (s != suggestion) { suggestion = s; applyEmptyText() }
     }
 
@@ -2358,6 +2443,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         private const val PROMPT_LINK = "handoff-prompt:"
         private const val RUN_LINK = "handoff-run:"
         private const val REWIND_LINK = "handoff-rewind:"
+        private const val COPY_LINK = "handoff-copy:"
         private val PRE = Regex("(<pre[^>]*>)(.*?)</pre>", RegexOption.DOT_MATCHES_ALL)
         private val SLASH = Regex("""/([\w:.-]+)(?=\s|$)""")
         private val PARAGRAPH = Regex("<p>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)

@@ -60,6 +60,22 @@ object Md {
     /** Sprungmarke einer Überschrift wie auf GitHub. */
     fun slug(heading: String) = plain(heading).lowercase().replace(Regex("[^a-z0-9 -]"), "").trim().replace(' ', '-')
 
+    /** Inhalt der Codeblöcke (```), in derselben Reihenfolge, in der [document] sie als `<pre>` ausgibt. */
+    fun codeBlocks(md: String): List<String> {
+        val lines = md.replace(Regex("(?s)<!--.*?-->"), "").lines()
+        val blocks = mutableListOf<String>()
+        var i = 0
+        while (i < lines.size) {
+            if (lines[i++].trimStart().startsWith("```")) {
+                val code = mutableListOf<String>()
+                while (i < lines.size && !lines[i].trimStart().startsWith("```")) code += lines[i++]
+                blocks += code.joinToString("\n")
+                i++
+            }
+        }
+        return blocks
+    }
+
     /**
      * Ganzes Dokument zu HTML für den Viewer: Überschriften (mit Sprungmarke), Absätze, Listen, Codeblöcke, Tabellen.
      * Bewusst eigener kleiner Umsetzer - die Markdown-Bibliothek der Plattform ändert ihre API zwischen den Versionen.

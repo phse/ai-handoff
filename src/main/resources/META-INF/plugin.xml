@@ -20,16 +20,19 @@
   <li><b>One click to run</b>, output in the Run tool window. Edit the command before running, or dismiss it with a note for Claude.</li>
   <li><b>Result back to Claude</b>: exit code and the last lines of output, no copy and paste.</li>
   <li><b>One changelist per task</b>: files Claude changes for a task land in their own changelist "Claude: &lt;task&gt;",
-      ready to review and commit on their own.</li>
+      ready to review and commit on their own. Several sessions in one project each keep their own task.</li>
   <li><b>Review with line notes</b>: Claude asks you to review its changes; open the diff, attach notes to single lines
       (hover a line, click the <b>+</b>) and approve or send the notes back, each with path, line and code.</li>
-  <li><b>Command sequences</b>: several commands as one card, run all or step by step, stops at the first failure.</li>
+  <li><b>Command sequences</b>: several commands as one card, run all or step by step, stops at the first failure.
+      <b>Copy</b> on every command card if you would rather run it yourself.</li>
   <li><b>Claude is waiting</b> (optional): a card and a notification when a Claude Code session in the project is done or
       needs your input. Read the full message in an editor tab and type your next prompt right into the card.</li>
   <li><b>Claude sessions in editor tabs</b>: start Claude Code from the IDE and work with it in an editor tab, the
       conversation formatted, prompts and slash commands sent to the terminal in the background. <code>/show-in-editor</code>
       opens a running session there, <b>Open in Handoff</b> in the terminal's menu shows the session of that tab, and
-      <b>↶</b> next to a prompt rewinds to before it.</li>
+      <b>↶</b> next to a prompt rewinds to before it. Copy code blocks and messages; the globe runs Remote Control.</li>
+  <li><b>Sessions</b>: all Claude Code sessions of the project at a glance, with state, model, context use and running
+      task, one click to their tab or terminal.</li>
   <li><b>Session logs (.jsonl)</b>: Claude Code's transcripts open as a readable conversation instead of raw JSON (switch
       to <i>Text</i> at the bottom), with tool steps, errors and changed files; resume one in a new tab or export it as Markdown.</li>
   <li><b>Questions with options</b>: Claude asks as a card, one answer or several, plus your own answer.</li>

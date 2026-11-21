@@ -67,8 +67,10 @@ Hovering a card shows a **✕** to close it.
   don't scroll away. Switch it off with **Pin Claude Messages to the Bottom**.
 - **Nothing waiting:** once Handoff is set up, the empty tab shows a single line - plus a link when your `CLAUDE.md`
   misses instructions for new features.
-- **Session tab in front:** cards of a session whose editor tab is in front show there only, and the card in the
-  tool window offers just **Show in Editor**. Sessions of other IDEs and other projects never show up here.
+- **Session tab in front:** cards of a session whose editor tab is in front show there only. Sessions of other IDEs and
+  other projects never show up here.
+- **Open in Editor** and **Show in Editor:** a card of a session links to its editor tab. **Show in Editor** brings the
+  open tab to the front; **Open in Editor** opens a new tab when the session has none yet.
 
 ### Notifications
 
@@ -81,8 +83,8 @@ is waiting. Notifications can be switched off in the operating system's settings
 ### Commands you run yourself
 
 Claude proposes a command; it appears as a card with the reason and the working directory. **Run** executes it in the
-Run tool window (type into it if the command asks for input), **Dismiss…** sends an optional note back. Risky commands
-are highlighted. Exit code and the last 60 output lines go back to Claude.
+Run tool window (type into it if the command asks for input), **Copy** puts it on the clipboard if you would rather run
+it yourself, **Dismiss…** sends an optional note back. Risky commands are highlighted. Exit code and the last 60 output lines go back to Claude.
 
 **Tools:** `handoff_propose_command`, `handoff_wait_for_result`.
 
@@ -98,7 +100,8 @@ instead of writing them into the chat.
 
 For steps that belong together (verify, tag, push, upload) Claude proposes one card with all commands. **Run All** runs
 them one after another, each in its own Run tab, and stops at the first one that fails; **Run Step n** runs only the
-next one. Each command can be edited until it has run. Claude gets exit code and output per step and sees which steps
+next one; **Copy** puts the remaining steps on the clipboard, joined with `&&`. Each command can be edited until it has
+run. Claude gets exit code and output per step and sees which steps
 were not run. Each command runs in its own shell, so `cd` and variables do not carry over.
 
 **Tools:** `handoff_propose_sequence`, `handoff_wait_for_result`.
@@ -215,6 +218,13 @@ then ask again. If I say I left notes in the editor, fetch them with handoff_get
 
 Files Claude changes during a task land in their own changelist **Claude: &lt;title&gt;**. When the task ends, the
 previous changelist becomes active again; an empty task changelist is removed.
+
+Several Claude sessions in the same project each keep their own task: a session ends only its own, and its review shows
+only its changelist. Files a session changes with Edit or Write go to that session's changelist, even while another
+task's changelist is active; files a session without a task changes go back to the changelist that was active before.
+A review from a session without a task leaves out the changelists of the other sessions' running tasks.
+Changes made through shell commands (`sed`, scripts) stay where the IDE sorted them. This needs the hooks from **Show
+When Claude Is Waiting**; without them, Handoff cannot tell the sessions apart.
 
 **Tools:** `handoff_begin_task`, `handoff_end_task`.
 
@@ -337,6 +347,10 @@ in a terminal tab in the background and opens the session in an editor tab:
   is done and the session runs in the IDE terminal; Handoff ends Claude Code there and resumes it at that point.
 - While Claude works: **Interrupt (Esc)**. When Claude asks for a permission: **Yes**, **Yes, Don't Ask Again** and
   **No** (the keys 1, 2 and Esc in the terminal). **Show Terminal** brings up the terminal tab for anything else.
+- **Copy** at a code block copies its code, **Copy message** below a message copies the whole message as Markdown.
+- The globe next to the microphone runs `/remote-control`: control the session from your phone or claude.ai/code. While
+  Remote Control is on, the globe is filled blue; clicking it then opens Claude Code's dialog in the terminal (QR code,
+  **Disconnect this session**). Connecting needs no answer, so the terminal stays hidden.
 
 **Open in Handoff** in the context menu of a terminal tab where Claude Code runs opens its session in an editor tab,
 and the tab takes over that terminal (prompts, slash commands, buttons). Handoff finds the session through Claude's process.
@@ -345,8 +359,8 @@ In a running Claude Code session, you can also type `/show-in-editor`: the IDE o
 front). The hook catches the command, so Claude never sees it. If the session runs in the IDE's terminal, the tab
 takes it over like one started from Handoff (prompts, slash commands, buttons). For sessions in other terminals the tab
 shows the conversation; prompts reach Claude only while it is done ("Claude is done"), and slash commands only through the
-terminal. The "done", "waiting" and "working" cards have **Open in Editor**. While Claude works, prefer **Open in
-Handoff** or **Open in Editor**: a command typed in the terminal makes Claude Code move a running shell command to the
+terminal. The "done", "waiting" and "working" cards have **Open in Editor** (**Show in Editor** once the tab is open).
+While Claude works, prefer **Open in Handoff** or **Open in Editor**: a command typed in the terminal makes Claude Code move a running shell command to the
 background, and Claude stops until it finishes. After Handoff was updated without restarting the IDE, its session tabs
 find their terminal tabs again by themselves.
 
@@ -365,6 +379,14 @@ In the 2026.3 Home window of PhpStorm, IntelliJ IDEA and PyCharm (no project ope
 *Clone Repository*: choose a folder, and the session opens in an editor tab. **Resume Claude Session…** there lists the
 latest sessions of all folders and continues the one you pick in its folder. Setting up the hooks also adds `~/.claude/commands/show-in-editor.md` (unless you have your own
 command of that name).
+
+## Sessions tab
+
+All Claude Code sessions running in this project at a glance, the ones that need you first: waiting for you, working,
+done, running. Each shows its title, folder, model and context, the last activity, the running task (its changelist)
+and a filled globe while Remote Control is on. **Show in Editor** / **Open in Editor** leads to the session's editor
+tab, **Show Terminal** to its terminal. Session tabs whose session no longer runs are listed as "Not running". No
+prompt needed; sessions show up once **Show When Claude Is Waiting** is on.
 
 ## Memory tab
 

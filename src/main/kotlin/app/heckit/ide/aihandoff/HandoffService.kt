@@ -86,6 +86,8 @@ class Proposal(
     /** Änderungen prüfen: Dann ist [command] leer, [reason] Claudes Zusammenfassung und [changelist] die Changelist der Aufgabe (null = alle Änderungen). */
     val review: Boolean = false,
     val changelist: String? = null,
+    /** Ohne [changelist]: Changelists, die nicht in die Prüfung gehören (laufende Aufgaben anderer Sessions). */
+    val excludeLists: Set<String> = emptySet(),
     /** Ablauf aus mehreren Befehlen (dann ist [command] leer): einzeln oder nacheinander ausführbar, Stopp beim ersten Fehler. */
     val steps: List<Step> = emptyList(),
     /** Fragen mit Auswahl (dann ist [command] leer und [reason] die Überschrift). */
@@ -320,8 +322,9 @@ class HandoffService(private val project: Project) {
         fireChanged()
     }
 
-    fun proposeReview(summary: String, changelist: String?): Proposal {
-        val p = Proposal("h${counter.incrementAndGet()}", "", summary, "", false, review = true, changelist = changelist)
+    fun proposeReview(summary: String, changelist: String?, excludeLists: Set<String> = emptySet()): Proposal {
+        val p = Proposal("h${counter.incrementAndGet()}", "", summary, "", false, review = true, changelist = changelist,
+            excludeLists = if (changelist == null) excludeLists else emptySet())
         add(p)
         Attention.notify(project, "Claude asks for a review", summary)
         fireChanged()
@@ -376,12 +379,22 @@ class HandoffService(private val project: Project) {
             javax.swing.Timer(DELIVER_AFTER_MS) {
                 // Nur an eine sicher bekannte Session - geraten landete das Ergebnis in einer fremden Session (2026-11-18).
                 val id = p.owner ?: return@Timer
-                if (p.fetched || project.isDisposed) return@Timer
+                if (p.fetched || p.id in delivered || project.isDisposed) return@Timer
                 val text = "Result of ${p.id}, which you handed over earlier through Handoff (you were no longer waiting for it):\n" + p.resultText()
-                if (sessions.reply(id, text)) p.fetched = true
+                if (sessions.reply(id, text)) { p.fetched = true; delivered += p.id }
             }.apply { isRepeats = false; start() }
         }
     }
+
+    /** Karten, deren Ergebnis schon als später Prompt an eine Session ging. */
+    private val delivered: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * [text] ist ein spätes Ergebnis, das Claude schon bekommen hat. h12 kam am 2026-11-18 ein zweites Mal an, vier Minuten
+     * später und über ein Senden aus einem Session-Reiter (Log) - woher der Text dort kam, ist nicht belegt. Darum wird
+     * jedes weitere Senden desselben Ergebnisses abgefangen, egal über welchen Weg.
+     */
+    fun alreadyDelivered(text: String): Boolean = LATE_RESULT.find(text.trimStart())?.groupValues?.get(1)?.let { it in delivered } == true
 
     fun find(id: String): Proposal? = proposals.firstOrNull { it.id == id }
 
@@ -423,6 +436,8 @@ class HandoffService(private val project: Project) {
         )
 
         fun looksRisky(command: String) = RISKY.containsMatchIn(command)
+
+        private val LATE_RESULT = Regex("^Result of (h\\d+), which you handed over earlier through Handoff")
 
         /** So lange warten, ob Claude das Ergebnis selbst abholt (ein laufendes handoff_wait_for_result kehrt sofort zurück). */
         private const val DELIVER_AFTER_MS = 4000

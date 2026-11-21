@@ -38,6 +38,13 @@ object HandoffIcons {
             ?: com.intellij.icons.AllIcons.Actions.Execute
     }
 
+    /** Weltkugel für Remote Control; [on]: verbunden (blau gefüllt, wirkt wie ein gedrückter Knopf). */
+    fun globe(on: Boolean = false): Icon {
+        val path = if (on) "/icons/globe_on.svg" else "/icons/globe${if (isDark()) "_dark" else ""}.svg"
+        return synchronized(cache) { cache.getOrPut(path) { url(path)?.let { IconLoader.findIcon(it, false) } } }
+            ?: com.intellij.icons.AllIcons.General.Web
+    }
+
     /** Sprechblase einer Notiz im Zeilenrand: Form wie im Handoff-Symbol (Spitze links unten), ohne Claude-Zeichen. */
     fun note(): Icon {
         val path = "/icons/note${if (isDark()) "_dark" else ""}.svg"

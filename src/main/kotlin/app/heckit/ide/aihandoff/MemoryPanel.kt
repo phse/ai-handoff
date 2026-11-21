@@ -101,7 +101,12 @@ class MemoryPanel(private val project: Project) : JPanel(BorderLayout()), Dispos
 
     fun refresh() {
         // Dateien außerhalb des Projekts kennt das VFS oft nicht - einmal einlesen, damit Änderungen künftig gemeldet werden.
-        listOfNotNull(File(claudeDir, "CLAUDE.md"), memoryDir).forEach { LocalFileSystem.getInstance().refreshAndFindFileByIoFile(it) }
+        // Im Hintergrund: Auf dem EDT meldete die IDE das Einlesen als langsame Operation (SEVERE, 2026-11-22).
+        val app = com.intellij.openapi.application.ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            listOfNotNull(File(claudeDir, "CLAUDE.md"), memoryDir).forEach { runCatching { LocalFileSystem.getInstance().refreshAndFindFileByIoFile(it) } }
+            app.invokeLater({ rebuild() }, project.disposed)
+        }
         rebuild()
     }
 

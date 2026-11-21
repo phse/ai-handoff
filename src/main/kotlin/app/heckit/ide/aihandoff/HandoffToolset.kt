@@ -113,7 +113,8 @@ class HandoffToolset : McpToolset {
         """
         |Starts a task: creates the VCS changelist "Claude: <title>" and makes it the active one, so every file changed from
         |now on lands there and the user can review and commit the task on its own. Call it before editing files for a new
-        |task; call handoff_end_task when the task is done.
+        |task; call handoff_end_task when the task is done. The task belongs to your session: other Claude sessions in the
+        |same project keep their own tasks, and files you change with Edit/Write go to your changelist.
         """
     )
     suspend fun handoff_begin_task(
@@ -121,21 +122,23 @@ class HandoffToolset : McpToolset {
         title: String,
     ): String {
         val project = currentCoroutineContext().project
-        val name = TaskChangelists.getInstance(project).begin(title)
+        val session = runCatching { Callers.session("handoff_begin_task", title.trim()) }.getOrNull()
+        val name = TaskChangelists.getInstance(project).begin(title, session)
         return "Changelist \"$name\" is now active. Call handoff_end_task when the task is done."
     }
 
     @McpTool
     @McpDescription(
         """
-        |Ends the task started with handoff_begin_task: makes the previously active changelist active again and returns
-        |the files changed in the task's changelist.
+        |Ends the task your session started with handoff_begin_task: makes the previously active changelist active again and
+        |returns the files changed in the task's changelist. Tasks of other sessions keep running.
         """
     )
     suspend fun handoff_end_task(): String {
         val project = currentCoroutineContext().project
-        val (name, files) = TaskChangelists.getInstance(project).end()
-            ?: return "No task is active."
+        val session = runCatching { Callers.session("handoff_end_task", null) }.getOrNull()
+        val (name, files) = TaskChangelists.getInstance(project).end(session)
+            ?: return if (session != null) "No task of this session is active." else "No task is active."
         return "Task changelist \"$name\" closed, ${files.size} changed file(s)" +
             (if (files.isEmpty()) "." else ":\n" + files.joinToString("\n"))
     }
@@ -257,7 +260,9 @@ class HandoffToolset : McpToolset {
         summary: String,
     ): String {
         val project = currentCoroutineContext().project
-        val p = HandoffService.getInstance(project).proposeReview(summary.trim(), TaskChangelists.getInstance(project).prepareReview())
+        val session = runCatching { Callers.session("handoff_request_review", summary.trim()) }.getOrNull()
+        val tasks = TaskChangelists.getInstance(project)
+        val p = HandoffService.getInstance(project).proposeReview(summary.trim(), tasks.prepareReview(session), tasks.otherTaskLists(session))
         ApplicationManager.getApplication().invokeLater({
             SessionEditors.revealCards(project, p)
         }, project.disposed)

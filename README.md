@@ -16,10 +16,13 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   Risky ones (production, publishing, deleting) get a highlighted border.
 - **Run** starts the command in the Run tool window, in a login shell (`$SHELL -l -i -c`), so your `PATH`, `JAVA_HOME`
   and aliases are there. The command can be edited before running.
+- **Copy** puts the command on the clipboard if you would rather run it yourself.
 - **Dismiss…** drops it, optionally with a note for Claude (e.g. "I'll do that tomorrow").
 - **Result back to Claude**: exit code and the last 60 lines of output. After the run the card turns green or red.
 - **One changelist per task**: Claude can open the changelist "Claude: <task>" before it edits files. Everything
   changed until the task ends lands there (new files are added to Git), so you review and commit the task on its own.
+  Several sessions in the same project each keep their own task: files a session changes with Edit or Write go to its
+  changelist, even while another task's changelist is active (needs the hooks from **Show When Claude Is Waiting**).
 - **Review with line notes**: Claude asks you to review its changes. The card lists the changed files of the task and
   opens their diff. Hover a line in the diff (or, while a review is waiting, in the editor) and click the **+** next to its line number, or use **Add Note for
   Claude…** in the context menu of the diff or editor (select several lines for a range); the note shows as a gutter icon and grey text at the end of the line. **Approve**, or **Send Notes**: Claude
@@ -44,7 +47,11 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   areas, Handoff cards and plan limits in the tab, and **Resume** after a restart. `/show-in-editor` opens a running
   session there, and **Open in Handoff** in the terminal's context menu shows the session running in that tab. **↶** next to
   a prompt rewinds to before it: code, conversation or both (`claude --resume … --rewind-files` / `--resume-session-at`).
-  Pasted file paths become short tokens like dropped files. Uses the IDE's terminal API, which JetBrains marks as experimental.
+  Pasted file paths become short tokens like dropped files. **Copy** above code blocks and below messages; the globe runs
+  `/remote-control` and turns blue while the session is connected. Uses the IDE's terminal API, which JetBrains marks as experimental.
+- **Sessions tab**: all Claude Code sessions of the project as cards with state (waiting, working, done, running, not
+  running), title, folder, model, context use and running task; **Show in Editor** (tab already open) or **Open in Editor**,
+  and **Show Terminal**.
 - **Session logs (.jsonl)**: Claude Code's transcripts (`~/.claude/projects/…`, or any `.jsonl` with a `sessionId`) open as
   a readable conversation instead of raw JSON, with tool steps, errors and changed files; **Text** at the bottom shows the
   file itself. **Resume in New Tab** continues the session, **Export Session as Markdown…** saves it.
@@ -78,9 +85,9 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
 |---|---|---|
 | `handoff_propose_command` | `command` (string), `reason` (string, one sentence), `workingDirectory` (absolute or relative to the project root, empty = root), `risky` (boolean, default `false`) | an `id` at once; opens the tool window |
 | `handoff_propose_sequence` | `commands` (list of strings, in order), `reason`, `workingDirectory`, `risky`, `interactive` | an `id` at once; one card, stops at the first failing command; `handoff_wait_for_result` returns exit code and output per step |
-| `handoff_begin_task` | `title` (a few words) | makes the new changelist `Claude: <title>` the active one |
-| `handoff_end_task` | – | the files changed in the task; makes the previous changelist active again, removes the task's changelist if empty |
-| `handoff_request_review` | `summary` (one or two sentences) | an `id` at once; reviews the changelist of the current or last task, otherwise all local changes |
+| `handoff_begin_task` | `title` (a few words) | makes the new changelist `Claude: <title>` the active one; one task per session |
+| `handoff_end_task` | – | the files changed in the calling session's task; makes the next running task's or the previous changelist active again, removes the task's changelist if empty |
+| `handoff_request_review` | `summary` (one or two sentences) | an `id` at once; reviews the changelist of the session's current or last task, otherwise all local changes except other sessions' tasks |
 | `handoff_get_notes` | – | the open line notes (`path:line`, note, line of code) and removes them; `No open notes.` |
 | `handoff_ask` | `questions` (list of `{question` (Markdown), `options` (list of `{label, description}`), `multiSelect}`), `title` (optional) | an `id` at once; one card, several questions with Back/Next, radio buttons or checkboxes and a field for an own answer per question |
 | `handoff_checklist` | `items` (list of `{step` (Markdown), `expected` (optional)`}`), `title` (optional) | an `id` at once; `handoff_wait_for_result` returns passed / failed / not done per step with the notes |

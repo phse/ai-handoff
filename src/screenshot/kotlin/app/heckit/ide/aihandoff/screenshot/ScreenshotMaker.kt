@@ -113,29 +113,32 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "04-viewer.png"))
+            ImageIO.write(image, "png", File(out, "05-viewer.png"))
         }
         edt { dialog?.close(1) }
         Thread.sleep(1000)
 
-        // 3: Memory, Projekt-CLAUDE.md aufgeklappt
-        val memory = edt { tw.contentManager.contents[1].component as MemoryPanel }
+        // 3: Memory, Projekt-CLAUDE.md aufgeklappt (Reiter: Commands, Sessions, Memory, Usage)
+        val memory = edt { tw.contentManager.contents[2].component as MemoryPanel }
         edt {
-            tw.contentManager.setSelectedContent(tw.contentManager.contents[1])
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[2])
             memory.refresh()
             memory.expand("f:" + File(base, "CLAUDE.md").path)
         }
         Thread.sleep(3000)
-        shot(frame, File(out, "05-memory.png"))
+        shot(frame, File(out, "06-memory.png"))
 
         // 4: Usage
-        val usage = edt { tw.contentManager.contents[2].component as UsagePanel }
+        val usage = edt { tw.contentManager.contents[3].component as UsagePanel }
         edt {
-            tw.contentManager.setSelectedContent(tw.contentManager.contents[2])
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[3])
             usage.refresh()
         }
         Thread.sleep(3000)
-        shot(frame, File(out, "06-usage.png"))
+        shot(frame, File(out, "07-usage.png"))
+
+        // Sessions-Übersicht: drei Sessions im Projekt (wartet, arbeitet, fertig)
+        sessionsScene(project, base, out, tw, frame)
 
         // 6: Ablauf aus mehreren Befehlen und eine wartende Claude-Session (vor Szene 5, die den Diff öffnet)
         val waitingFile = File(app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }, "handoff-demo.json")
@@ -155,7 +158,7 @@ object ScreenshotMaker {
             tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
         }
         Thread.sleep(4000)
-        shot(frame, File(out, "08-sequence.png"))
+        shot(frame, File(out, "09-sequence.png"))
         waitingFile.delete(); listenFile.delete()
         Thread.sleep(2500)
 
@@ -180,10 +183,10 @@ object ScreenshotMaker {
             tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
         }
         Thread.sleep(2500)
-        shot(frame, File(out, "09-ask.png"))
+        shot(frame, File(out, "10-ask.png"))
 
         // 7b: Prüfliste und Geheimnis
-        cards(project, frame, tw, service, base, out, "10-checklist.png")
+        cards(project, frame, tw, service, base, out, "11-checklist.png")
 
         // 8: Handoff Tools (Dialog als eigenes Bild)
         var tools: app.heckit.ide.aihandoff.ToolsDialog? = null
@@ -200,7 +203,7 @@ object ScreenshotMaker {
             val image = BufferedImage((w.width * SCALE).toInt(), (w.height * SCALE).toInt(), BufferedImage.TYPE_INT_ARGB)
             val g = image.createGraphics(); g.scale(SCALE, SCALE)
             (w as RootPaneContainer).rootPane.paint(g); g.dispose()
-            ImageIO.write(image, "png", File(out, "11-tools.png"))
+            ImageIO.write(image, "png", File(out, "12-tools.png"))
         }
         edt { tools?.close(1) }
         Thread.sleep(1000)
@@ -247,7 +250,7 @@ object ScreenshotMaker {
                 } ?: log.warn("Handoff: no diff editor for the hover")
         }
         Thread.sleep(1000)
-        shot(frame, File(out, "07-review.png"))
+        shot(frame, File(out, "08-review.png"))
         log.warn("Handoff: screenshots written to $out")
     }
 
@@ -306,7 +309,7 @@ object ScreenshotMaker {
             }
         }
         Thread.sleep(800)
-        shot(frame, File(out, "03-session-log.png"))
+        shot(frame, File(out, "04-session-log.png"))
         edt {
             com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).let { m -> m.openFiles.forEach(m::closeFile) }
             ToolWindowManager.getInstance(project).getToolWindow("Project")?.hide()
@@ -390,6 +393,88 @@ object ScreenshotMaker {
         files.forEach { it.delete() }
         transcript.delete()
         Thread.sleep(1500)
+    }
+
+    /**
+     * Reiter "Sessions" mit drei erfundenen Sessions im Demo-Projekt: eine wartet auf eine Freigabe, eine arbeitet (mit
+     * Aufgabe und Remote Control), eine ist fertig. Hook-Dateien wie von `hook.sh`, Modell und Kontext wie aus der Statuszeile.
+     */
+    private fun sessionsScene(project: Project, base: File, out: File, tw: com.intellij.openapi.wm.ToolWindow, frame: JFrame) {
+        val dir = File(System.getProperty("user.home"), ".claude/projects/" + base.absolutePath.replace(Regex("[^A-Za-z0-9]"), "-")).apply { mkdirs() }
+        val waiting = app.heckit.ide.aihandoff.WaitingHook.waiting.apply { mkdirs() }
+        val now = System.currentTimeMillis()
+        val written = mutableListOf<File>()
+        fun str(t: String) = com.google.gson.JsonPrimitive(t).toString()
+        class Demo(val id: String, val title: String, val prompt: String, val model: String, val context: Int, val remote: Boolean = false) {
+            val transcript = File(dir, "$id.jsonl")
+            fun hook(event: String, extra: com.google.gson.JsonObject.() -> Unit = {}) = com.google.gson.JsonObject().apply {
+                addProperty("session_id", id); addProperty("cwd", base.path); addProperty("transcript_path", transcript.path)
+                addProperty("hook_event_name", event); extra()
+            }.toString()
+        }
+        val release = Demo("5b1e2f80-3c41-4c7a-9a52-6d0b1f2e7a11", "Release 2.5.0", "Prepare release 2.5.0", "Sonnet 5.5", 23)
+        val shipping = Demo("9c4d7a13-8e25-4f60-b1d3-2a7e5c9f0b42", "Free shipping threshold", "Add a free shipping threshold to the cart total", "Opus 5.5", 41, remote = true)
+        val buttons = Demo("e27f0c95-61ab-4d38-8f4e-7b3c2d1a9e63", "Checkout button styles", "Try three styles for the checkout button", "Opus 5.5", 64)
+        for (d in listOf(release, shipping, buttons)) {
+            d.transcript.writeText(listOfNotNull(
+                """{"type":"user","message":{"role":"user","content":${str(d.prompt)}}}""",
+                """{"type":"ai-title","aiTitle":${str(d.title)}}""",
+                if (d.remote) """{"type":"bridge-session","bridgeSessionId":"demo"}""" else null,
+            ).joinToString("\n") + "\n")
+            d.transcript.setLastModified(now - 120_000)
+            written += d.transcript
+            written += File(waiting, "${d.id}.info").apply { writeText(d.hook("UserPromptSubmit")) }
+            app.heckit.ide.aihandoff.SessionEditors.statusBySession[d.id] = com.google.gson.JsonParser.parseString(
+                """{"model":{"display_name":"${d.model}"},"context_window":{"used_percentage":${d.context}}}""").asJsonObject
+        }
+        written += File(waiting, "${release.id}.json").apply {
+            writeText(release.hook("Notification") { addProperty("message", "Claude needs your permission to use Bash: npm version minor"); addProperty("notification_type", "permission_prompt") })
+            setLastModified(now - 60_000)
+        }
+        written += File(waiting, "${shipping.id}.busy").apply {
+            writeText(shipping.hook("UserPromptSubmit") { addProperty("prompt", shipping.prompt) })
+            setLastModified(now - 4 * 60_000)
+        }
+        written += File(waiting, "${buttons.id}.json").apply {
+            writeText(buttons.hook("Stop") { addProperty("last_assistant_message", "Three styles are ready: **rounded**, **pill** and **square**. Pick one in the image card.") })
+            setLastModified(now - 9 * 60_000)
+        }
+        written += File(waiting, "${buttons.id}.listen").apply { writeText("0") }
+        val tasks = app.heckit.ide.aihandoff.TaskChangelists.getInstance(project)
+        write {
+            val vcs = com.intellij.openapi.vcs.ProjectLevelVcsManager.getInstance(project)
+            if (vcs.directoryMappings.isEmpty()) vcs.directoryMappings = listOf(com.intellij.openapi.vcs.VcsDirectoryMapping("", "Git"))
+        }
+        Thread.sleep(3000)
+        runCatching { kotlinx.coroutines.runBlocking { tasks.begin("Free shipping threshold", shipping.id) } }
+            .onFailure { log.warn("Handoff: demo task failed", it) }
+        Thread.sleep(3000)
+        edt {
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[1])
+            (tw.contentManager.contents[1].component as app.heckit.ide.aihandoff.SessionsPanel).refresh()
+        }
+        Thread.sleep(4000)
+        edt {
+            com.intellij.notification.NotificationsManager.getNotificationsManager()
+                .getNotificationsOfType(com.intellij.notification.Notification::class.java, project).forEach { it.expire() }
+        }
+        // Uhrzeiten ("since 00:27") verraten Arbeitszeiten - feste Zeiten am Vormittag einsetzen.
+        edt {
+            val fixed = ArrayDeque(listOf("10:41", "10:38", "10:32"))
+            com.intellij.util.ui.UIUtil.findComponentsOfType(tw.contentManager.contents[1].component, javax.swing.JLabel::class.java)
+                .filter { Regex("since \\d\\d:\\d\\d").containsMatchIn(it.text.orEmpty()) }
+                .forEach { l -> fixed.removeFirstOrNull()?.let { t -> l.text = l.text.replace(Regex("since \\d\\d:\\d\\d"), "since $t") } }
+        }
+        Thread.sleep(500)
+        shot(frame, File(out, "03-sessions.png"))
+        written.forEach { it.delete() }
+        runCatching { kotlinx.coroutines.runBlocking { tasks.end(shipping.id) } }
+        edt {
+            listOf(release, shipping, buttons).forEach { app.heckit.ide.aihandoff.SessionEditors.statusBySession.remove(it.id) }
+            HandoffService.getInstance(project).proposals.clear(); HandoffService.getInstance(project).fireChanged()
+            tw.contentManager.setSelectedContent(tw.contentManager.contents[0])
+        }
+        Thread.sleep(2500)
     }
 
     private val CART_CHANGED = """
