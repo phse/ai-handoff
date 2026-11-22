@@ -69,6 +69,10 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.11.2</h3>
+            <ul>
+              <li>Fix: 1.11.1 failed to run in PhpStorm 2026.1 and 2026.2 (built against the wrong platform).</li>
+            </ul>
             <h3>1.11.1</h3>
             <ul>
               <li>Closing an idle session tab now ends the Claude Code process of its terminal; before, it kept running
