@@ -69,6 +69,15 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.11.1</h3>
+            <ul>
+              <li>Closing an idle session tab now ends the Claude Code process of its terminal; before, it kept running
+                  without a terminal and swallowed the next prompt sent from the reopened tab ("Running…" forever).</li>
+              <li>Prompts go to a waiting session only while its hook still listens; slash commands are not sent where they
+                  cannot run.</li>
+              <li>Resuming with a command that opens a dialog (<code>/help</code>, <code>/mcp</code> …) brings the terminal
+                  to the front.</li>
+            </ul>
             <h3>1.11.0</h3>
             <ul>
               <li><b>Sessions</b> tab: every Claude Code session of the project with its state (waiting, working, done), title,

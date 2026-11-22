@@ -76,7 +76,7 @@ object SlashArguments {
      * Terminal nach vorn. Liste nach Bedienung von Claude Code 2.1.327, nicht vollständig nachgelesen.
      */
     private val dialogs = setOf("mcp", "config", "permissions", "agents", "hooks", "memory", "plugin", "output-style",
-        "theme", "rewind", "export", "status", "usage", "login", "ide", "doctor", "tui", "voice")
+        "theme", "rewind", "export", "status", "usage", "login", "ide", "doctor", "tui", "voice", "help")
 
     fun opensDialog(text: String): Boolean = text.trim().takeIf { it.startsWith("/") }?.removePrefix("/")?.let { it in dialogs } == true
 

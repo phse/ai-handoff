@@ -307,6 +307,9 @@ object SessionEditors {
         OpenFileDescriptor(project, fresh).navigate(true)
         FileEditorManager.getInstance(project).closeFile(file)
         com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
+        // Ein Befehl mit Dialog (/help, /mcp …) als Resume-Prompt: Terminal nach vorn, sonst wartete der Dialog dort
+        // unbemerkt (2026-11-22).
+        if (prompt != null && SlashArguments.opensDialog(prompt)) SessionTerminals.show(project, tab)
     }
 
     private const val KEY = "app.heckit.ide.aihandoff.sessionTabs"
@@ -1955,6 +1958,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
             return
         }
         warnedTyped = null
+        // Über den wartenden Stop-Hook kommt Text nur als Hinweis an, ein Slash-Befehl liefe dort nie - er blieb als
+        // "Running…" stehen und sperrte das Feld (2026-11-22).
+        if (text.startsWith("/") && !(tab != null && terminalOpen)) {
+            hint.text = "Slash commands only reach sessions running in the IDE terminal (New Claude Session or Resume)."
+            return
+        }
         val ok = when {
             tab != null && terminalOpen -> if (now) SessionTerminals.sendNow(project, tab, text) else SessionTerminals.send(project, tab, text)
             else -> sessionId?.let { sessions.reply(it, text) } == true
@@ -2428,9 +2437,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Ruht Claude, auch den Terminal-Reiter schließen - sonst sammeln sich dort unzählige "Claude"-Reiter (2026-11-17). Die
         // Session lässt sich per /resume wieder öffnen; arbeitet Claude gerade, bleibt das Terminal offen.
         val tab = file.tab.takeIf { !file.busy && !SessionEditors.isClosing(project) }
+        val id = sessionId
         ApplicationManager.getApplication().invokeLater({
             SessionEditors.save(project)
-            if (tab != null && FileEditorManager.getInstance(project).openFiles.none { it is SessionFile && it.tab == tab }) SessionTerminals.close(project, tab)
+            if (tab != null && FileEditorManager.getInstance(project).openFiles.none { it is SessionFile && it.tab == tab }) {
+                SessionTerminals.close(project, tab)
+                id?.let { sessions.ended(it) }
+            }
         }, project.disposed)
     }
 

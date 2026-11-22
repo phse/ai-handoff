@@ -1,5 +1,7 @@
 package app.heckit.ide.aihandoff
 
+import com.intellij.util.concurrency.AppExecutorUtil
+
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -250,7 +252,11 @@ object WaitingHook {
 class WaitingSession(val file: File, val at: Long, val cwd: String, val finished: Boolean, val text: String, val notificationType: String? = null) {
     val id get() = file.nameWithoutExtension
     /** Ein Stop-Hook wartet im Hintergrund auf einen weiteren Prompt aus der IDE. */
-    val listening get() = finished && File(file.parentFile, "$id.listen").isFile
+    val listening get() = finished && File(file.parentFile, "$id.listen").let { f ->
+        // Nur wenn der Hook-Prozess noch lebt: Eine verwaiste .listen-Datei ließ den Reiter senden, obwohl niemand mehr
+        // zuhörte - der Prompt blieb ewig "Running…" (2026-11-22).
+        f.isFile && runCatching { f.readText().trim().toLong() }.getOrNull()?.let { ProcessHandle.of(it).map { h -> h.isAlive }.orElse(false) } != false
+    }
 }
 
 /** Eine Session, an der Claude gerade arbeitet (Prompt abgeschickt, noch kein Stop). */
@@ -380,6 +386,25 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
     /** Session, deren Claude-Prozess in der Shell [shellPid] läuft (Terminal-Reiter), die jüngste bei mehreren. */
     fun sessionInShell(shellPid: Long): SessionInfo? =
         infos.values.filter { i -> i.pid != null && SessionTerminals.ancestors(i.pid).contains(shellPid) }.maxByOrNull { it.at }
+
+    /**
+     * Session endet mit ihrem Terminal-Reiter: Der Reiter wird beim Schließen hart beendet (SIGKILL der Shell), Claude Code
+     * lief danach ohne Terminal weiter und sein Stop-Hook hörte noch auf Prompts aus der IDE - der nächste Prompt verschwand
+     * darin, der Reiter stand auf "Running…" (2026-11-22). Darum den Hook freigeben und Claude beenden; Resume setzt fort.
+     */
+    fun ended(id: String) {
+        File(WaitingHook.waiting, "$id.listen").delete()
+        File(WaitingHook.waiting, "$id.busy").delete()
+        val pid = infos[id]?.pid
+        val h = pid?.let { ProcessHandle.of(it).orElse(null) }
+        logger<WaitingSessions>().info("Handoff: session $id ended with its terminal, claude pid=$pid alive=${h?.isAlive}")
+        if (h == null || !h.isAlive) return
+        h.destroy()
+        // Ohne Terminal reagierte Claude Code nicht immer auf SIGTERM (Prozess blieb im Handtest stehen, 2026-11-22).
+        AppExecutorUtil.getAppScheduledExecutorService().schedule({
+            if (h.isAlive) { logger<WaitingSessions>().info("Handoff: claude pid=$pid ignored SIGTERM, killing"); h.destroyForcibly() }
+        }, 3, java.util.concurrent.TimeUnit.SECONDS)
+    }
 
     /** Ob [reply] für diese Session etwas senden kann, und ob auch Slash-Befehle ankommen (nur über das Terminal). */
     fun canReply(id: String): Boolean = canSendKeys(id) || waiting(id)?.listening == true
