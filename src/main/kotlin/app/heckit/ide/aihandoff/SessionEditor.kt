@@ -467,7 +467,7 @@ object SessionLinks {
     fun open(project: Project, link: String, base: String?) {
         when {
             link.startsWith("settings:") -> com.intellij.openapi.options.ShowSettingsUtil.getInstance()
-                .showSettingsDialog(project, java.net.URLDecoder.decode(link.removePrefix("settings:"), Charsets.UTF_8))
+                .showSettingsDialog(project, urlDecode(link.removePrefix("settings:")))
             link.startsWith("action:") -> runAction(project, link.removePrefix("action:"))
             link.startsWith("handoff:") -> Actions.run(project, link.removePrefix("handoff:"))
             link.startsWith("http://") || link.startsWith("https://") || link.startsWith("mailto:") -> BrowserUtil.browse(link)
@@ -497,7 +497,13 @@ object SessionLinks {
 
     /** Datei (mit Zeile) finden; null, wenn es sie nicht gibt. */
     fun resolve(text: String, base: String?): Pair<File, Int?>? {
-        val m = WITH_LINE.matchEntire(java.net.URLDecoder.decode(text.trim(), Charsets.UTF_8)) ?: return null
+        // Raw text first: decoding turns "+" into a space ("a+b.md"); decoded for links with %20 and the like.
+        val raw = text.trim()
+        return resolveRaw(raw, base) ?: urlDecode(raw).takeIf { it != raw }?.let { resolveRaw(it, base) }
+    }
+
+    private fun resolveRaw(text: String, base: String?): Pair<File, Int?>? {
+        val m = WITH_LINE.matchEntire(text) ?: return null
         val path = m.groupValues[1]
         if (path.contains('\n') || path.startsWith("-")) return null
         val line = (m.groupValues[2].ifEmpty { m.groupValues[3] }).toIntOrNull()
@@ -1026,21 +1032,21 @@ private class SessionEditor(private val project: Project, private val file: Sess
             if (e.eventType != HyperlinkEvent.EventType.ACTIVATED) return@addHyperlinkListener
             val link = e.description ?: e.url?.toString() ?: return@addHyperlinkListener
             if (link.startsWith(RUN_LINK)) {
-                val cmd = java.net.URLDecoder.decode(link.removePrefix(RUN_LINK), Charsets.UTF_8)
+                val cmd = urlDecode(link.removePrefix(RUN_LINK))
                 if (file.tab != null && terminalOpen) runCommand(cmd)
-                else hint.text = "Slash commands only reach sessions started here (New Claude Session)."
+                else notice("Slash commands only reach sessions started here (New Claude Session).")
                 return@addHyperlinkListener
             }
             if (link.startsWith(REWIND_LINK)) { rewind(link.removePrefix(REWIND_LINK)); return@addHyperlinkListener }
             if (link.startsWith(COPY_LINK)) {
                 copyTexts[link.removePrefix(COPY_LINK)]?.let { text ->
                     com.intellij.openapi.ide.CopyPasteManager.getInstance().setContents(java.awt.datatransfer.StringSelection(text))
-                    hint.text = "Copied to the clipboard."
+                    notice("Copied to the clipboard.", error = false)
                 }
                 return@addHyperlinkListener
             }
             if (link.startsWith(PROMPT_LINK)) {
-                input.text = java.net.URLDecoder.decode(link.removePrefix(PROMPT_LINK), Charsets.UTF_8)
+                input.text = urlDecode(link.removePrefix(PROMPT_LINK))
                 input.requestFocusInWindow(); input.caretPosition = input.document.length
                 return@addHyperlinkListener
             }
@@ -1616,7 +1622,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         input.requestFocusInWindow()
         fun done(handled: Boolean) {
             logger<SessionEditor>().info("Handoff: startDictation handled=$handled (stop=$stop)")
-            if (!handled) { dictating = false; hint.text = "Dictation did not start - switch it on in System Settings > Keyboard > Dictation."; return }
+            if (!handled) { dictating = false; notice("Dictation did not start - switch it on in System Settings > Keyboard > Dictation."); return }
             dictating = !stop
         }
         Dictation.toggle(::done)
@@ -1646,8 +1652,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val t = transcript ?: return
         val id = sessionId ?: return
         val tab = file.tab
-        if (tab == null || !terminalOpen) { hint.text = "Rewind needs the session in the IDE terminal (New Claude Session, or Open in Handoff in the terminal's menu)."; return }
-        if (file.busy) { hint.text = "Rewind works when Claude is done - wait, or interrupt with Esc."; return }
+        if (tab == null || !terminalOpen) { notice("Rewind needs the session in the IDE terminal (New Claude Session, or Open in Handoff in the terminal's menu)."); return }
+        if (file.busy) { notice("Rewind works when Claude is done - wait, or interrupt with Esc."); return }
         val prompt = t.entries.firstOrNull { it.uuid == promptUuid }?.text.orEmpty()
         val target = t.resumeTarget(promptUuid)
         val options = if (target != null) arrayOf("Code and Conversation", "Conversation Only", "Code Only", "Cancel") else arrayOf("Code Only", "Cancel")
@@ -1665,7 +1671,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Prozess vor dem /exit merken: Der Hook schreibt .pid bei jedem Ereignis neu, SessionEnd löscht sie.
         val pid = WaitingSessions.getInstance(project).infos[id]?.pid ?: File(WaitingHook.waiting, "$id.pid").takeIf { it.isFile }
             ?.let { runCatching { it.readText().trim().toLong() }.getOrNull() }
-        if (!SessionTerminals.send(project, tab, "/exit")) { hint.text = "Could not reach the terminal."; return }
+        if (!SessionTerminals.send(project, tab, "/exit")) { notice("Could not reach the terminal."); return }
         // Erst wenn der Claude-Prozess beendet ist, liest wieder die Shell - sonst ginge der Befehl als Prompt an Claude.
         // Das Verschwinden der Hook-Daten (SessionEnd) allein reichte nicht: In der Sandbox landete der Befehl am 2026-11-19
         // trotzdem im Eingabefeld von Claude. Ohne bekannten Prozess bleibt es bei SessionEnd, dazu eine Pause für die Shell.
@@ -1679,13 +1685,13 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 if (running()) { if (now < until) return@addActionListener }
                 else { if (goneAt == 0L) goneAt = now; if (now - goneAt < 700) return@addActionListener }
                 stop()
-                if (running()) { hint.text = "Claude Code did not exit - rewind cancelled. Try /exit in the terminal."; return@addActionListener }
+                if (running()) { notice("Claude Code did not exit - rewind cancelled. Try /exit in the terminal."); return@addActionListener }
                 SessionTerminals.send(project, tab, cmd)
                 if (conversation && target != null) {
                     t.discardAfter(target)
                     input.text = prompt; input.caretPosition = input.document.length
                 }
-                hint.text = when { code && conversation -> "Code and conversation went back."; code -> "Code went back."; else -> "Conversation went back." }
+                notice(when { code && conversation -> "Code and conversation went back."; code -> "Code went back."; else -> "Conversation went back." }, error = false)
                 renderTranscript(force = true)
             }
             start()
@@ -1929,7 +1935,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Ein spätes Ergebnis, das Claude schon hat, nicht noch einmal schicken (h12 kam doppelt, 2026-11-18).
         if (HandoffService.getInstance(project).alreadyDelivered(shown)) {
             logger<SessionEditor>().warn("Handoff: late result in the input blocked (suggestion=${shown == suggestion}): ${shown.take(40)}")
-            hint.text = "Claude already got this result - it is not sent again."
+            notice("Claude already got this result - it is not sent again.")
             input.text = ""
             return
         }
@@ -1951,17 +1957,18 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Hinweise wie "[⧉ In datei.md]" (offene Editor-Datei bzw. Auswahl, zeigt Claude Code in der Eingabezeile) sind kein
         // getippter Text und gehen nicht mit - sonst warnte das erste Enter nach jedem Wechsel der Editor-Datei (2026-11-18).
         val typed = (if (tab != null && terminalOpen) SessionTerminals.typedInput(project, tab) else null)
-            ?.replace(Regex("""^(?:\[[^\]\n]+]\s*)+"""), "")?.trim()?.takeIf { it.isNotEmpty() }
+            ?.replace(EDITOR_HINTS, "")?.trim()?.takeIf { it.isNotEmpty() }
         if (typed != null && typed != warnedTyped) {
+            logger<SessionEditor>().info("Handoff: send held back, terminal input holds: ${typed.take(80)}")
             warnedTyped = typed
-            hint.text = "The terminal input already holds \"${typed.take(60)}\" - it would be sent along. Clear it there (Ctrl+U) or send again."
+            notice("The terminal input already holds \"${typed.take(60)}\" - it would be sent along. Clear it there (Ctrl+U) or send again.")
             return
         }
         warnedTyped = null
         // Über den wartenden Stop-Hook kommt Text nur als Hinweis an, ein Slash-Befehl liefe dort nie - er blieb als
         // "Running…" stehen und sperrte das Feld (2026-11-22).
         if (text.startsWith("/") && !(tab != null && terminalOpen)) {
-            hint.text = "Slash commands only reach sessions running in the IDE terminal (New Claude Session or Resume)."
+            notice("Slash commands only reach sessions running in the IDE terminal (New Claude Session or Resume).")
             return
         }
         val ok = when {
@@ -1969,13 +1976,14 @@ private class SessionEditor(private val project: Project, private val file: Sess
             else -> sessionId?.let { sessions.reply(it, text) } == true
         }
         if (ok) {
+            noticeText = null
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
             if (!file.busy) startedIdle += text
             pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
             if (tab != null && opensDialog(text)) showDialogTerminal(tab)
         }
         else {
-            hint.text = if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal."
+            notice(if (text.startsWith("/")) "Slash commands only reach sessions started here (New Claude Session)." else "Claude is busy - send when it is done, or type in the terminal.")
         }
     }
 
@@ -2236,7 +2244,14 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 continue
             }
             i++
-            appendEntry(html, e, offset + i - 1)
+            // One faulty entry must not stop the whole transcript (2026-11-23: a "%" did).
+            val mark = html.length
+            try { appendEntry(html, e, offset + i - 1) } catch (ex: Exception) {
+                if (ex is com.intellij.openapi.progress.ProcessCanceledException) throw ex
+                logger<SessionEditor>().warn("Handoff: entry failed to render", ex)
+                html.setLength(mark)
+                html.append("<pre>").append(StringUtil.escapeXmlEntities(e.text)).append("</pre>")
+            }
         }
         // Abgeschickt, aber noch nicht im Protokoll (Claude arbeitet noch und hat ihn nur vorgemerkt): grau zeigen.
         // Claude Code speichert Prompts teils verändert (Bildpfade als [Image #1], eingefügter Text gekürzt) - der Text passt
@@ -2381,7 +2396,10 @@ private class SessionEditor(private val project: Project, private val file: Sess
             else -> "Claude is not waiting for a prompt"
         }
         applyEmptyText()
+        val note = noticeText?.takeIf { System.currentTimeMillis() < noticeUntil }
+        hint.foreground = if (note != null && noticeError) JBColor.namedColor("Label.errorForeground", JBColor.RED) else UIUtil.getContextHelpForeground()
         hint.text = when {
+            note != null -> note
             argHint != null -> argHint!!
             terminal -> "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
@@ -2390,6 +2408,19 @@ private class SessionEditor(private val project: Project, private val file: Sess
             id == null && tab == null -> "Session not found."
             else -> "Send when Claude is done, or type in the terminal."
         }
+    }
+
+    /**
+     * One-off message (refused send, error) that stays for a while: updateState rewrites the hint on every refresh, so
+     * a plain hint.text vanished after a few ms and nobody saw it (2026-11-23).
+     */
+    private var noticeText: String? = null
+    private var noticeUntil = 0L
+    private var noticeError = true
+
+    private fun notice(text: String, error: Boolean = true) {
+        noticeText = text; noticeError = error; noticeUntil = System.currentTimeMillis() + 10_000
+        updateState(sessionId)
     }
 
     /** Text im Terminal-Eingabefeld, vor dem [send] schon gewarnt hat. */
@@ -2593,3 +2624,14 @@ private class RewindDialog(project: Project, private val prompt: String, private
         }
     }.toTypedArray<javax.swing.Action>() + cancelAction
 }
+
+/** URL-decodes; a stray "%" (e.g. SQL "LIKE '/x/%'") keeps the text as is instead of throwing. */
+internal fun urlDecode(text: String): String =
+    try { java.net.URLDecoder.decode(text, Charsets.UTF_8) } catch (_: IllegalArgumentException) { text }
+
+/**
+ * Hints like "[⧉ In datei.md]" at the start of Claude Code's input line (open editor file or selection). The name may
+ * contain brackets itself - a SQL console is "console [live2023]" - so a hint ends at a "]" followed by a space or the
+ * line end, not at the first "]" (the left-over "]" counted as typed text and swallowed the first Enter, 2026-11-23).
+ */
+internal val EDITOR_HINTS = Regex("""^(?:\[[^\n]*?](?=\s|$)\s*)+""")

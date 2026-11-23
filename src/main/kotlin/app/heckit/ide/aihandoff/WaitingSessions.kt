@@ -451,7 +451,11 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             val len = raf.length(); val from = maxOf(0L, len - 32_000)
             val buf = ByteArray((len - from).toInt()); raf.seek(from); raf.readFully(buf)
             val last = String(buf, Charsets.UTF_8).lines().lastOrNull { it.contains("\"type\":\"user\"") || it.contains("\"type\":\"assistant\"") }
-            last != null && last.contains("\"type\":\"user\"") && last.contains("[Request interrupted by user")
+            // Nur als eigener Text-Eintrag (auch neben einem abgelehnten Werkzeugaufruf), nicht in einem Werkzeugergebnis, das
+            // den Text zitiert - dort stehen die Anführungszeichen maskiert. Claude las Handoffs Quelltext, der Reiter zeigte
+            // mitten in der Arbeit nicht mehr "working" (2026-11-22).
+            last != null && last.contains("\"type\":\"user\"") &&
+                Regex("\"(?:text|content)\":\"\\[Request interrupted by user").containsMatchIn(last)
         }
     }.getOrDefault(false)
 

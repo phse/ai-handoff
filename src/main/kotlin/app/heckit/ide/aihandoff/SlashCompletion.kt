@@ -538,10 +538,10 @@ class SlashCompletion(
         return File(dir).walkTopDown().maxDepth(6)
             .onEnter { it.path == dir || (it.name !in skip && !it.name.startsWith(".")) }
             .takeWhile { System.currentTimeMillis() < until }
-            .filter { it.isFile && it.name.contains(typed, ignoreCase = true) }
+            .filter { it.path != dir && it.name.contains(typed, ignoreCase = true) }
             .take(200).toList()
             .sortedWith(compareBy({ if (it.name.startsWith(typed, ignoreCase = true)) 0 else 1 }, { it.name.length }))
-            .take(30).map { SlashCommand(it.name, shown(it.path), it.path) }
+            .take(30).map { SlashCommand(if (it.isDirectory) it.name + "/" else it.name, shown(it.path), it.path) }
     }
 
     private fun projectFiles(typed: String, limit: Int = 30): List<SlashCommand> = runCatching {
@@ -553,11 +553,12 @@ class SlashCompletion(
             val base = project.basePath
             names.sortedWith(compareBy({ if (it.startsWith(typed, ignoreCase = true)) 0 else 1 }, { it.length }, { it }))
                 .asSequence()
-                .flatMap { n -> com.intellij.psi.search.FilenameIndex.getVirtualFilesByName(n, scope).asSequence().filter { !it.isDirectory && it.isInLocalFileSystem } }
+                .flatMap { n -> com.intellij.psi.search.FilenameIndex.getVirtualFilesByName(n, scope).asSequence().filter { it.isInLocalFileSystem && (!it.isDirectory || it.path != base) } }
                 .take(limit)
                 .map { f ->
                     val dir = f.parent?.path.orEmpty()
-                    SlashCommand(f.name, if (base != null && dir.startsWith(base)) dir.removePrefix(base).removePrefix("/").ifEmpty { "." } else dir, f.path)
+                    // Ordner mit "/" am Ende: Claude Code liest bei @ordner dessen Inhaltsliste (2026-11-22, @einsortieren fehlte).
+                    SlashCommand(if (f.isDirectory) f.name + "/" else f.name, if (base != null && dir.startsWith(base)) dir.removePrefix(base).removePrefix("/").ifEmpty { "." } else dir, f.path)
                 }.toList()
         })
     }.getOrDefault(emptyList())

@@ -69,6 +69,14 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.11.3</h3>
+            <ul>
+              <li>Fix: a "%" in a message (e.g. SQL <code>LIKE '/x/%'</code>) stopped the session tab from updating; a
+                  faulty entry no longer stops the rest of the transcript.</li>
+              <li>Fix: after using a SQL console the first Enter did not send; refused sends now show a red hint that stays.</li>
+              <li>Fix: the "working" spinner could disappear while Claude was still working.</li>
+              <li>@ completion suggests folders too; file names with "+" are linked.</li>
+            </ul>
             <h3>1.11.2</h3>
             <ul>
               <li>Fix: 1.11.1 failed to run in PhpStorm 2026.1 and 2026.2 (built against the wrong platform).</li>
@@ -410,4 +418,14 @@ tasks.runIde {
 // Ohne -Pscreenshots bleibt aus dem Build-Cache sonst ein leeres screenshot/-Verzeichnis in den Jars.
 tasks.withType<Zip>().configureEach {
     includeEmptyDirs = false
+}
+
+// Release nie gegen die lokale IDE bauen: 1.11.1 war gegen 2026.3 gebaut und lief unter 2026.1/2026.2 nicht
+// (FileEditorManager.Companion, 2026-11-22). Vor dem Veröffentlichen local.properties wegbenennen.
+tasks.named("publishPlugin") {
+    doFirst {
+        if (platformLocalPath != null) throw GradleException(
+            "platformLocalPath is set (local.properties): rename local.properties and rebuild against platformVersion before publishing."
+        )
+    }
 }
