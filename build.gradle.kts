@@ -423,8 +423,10 @@ tasks.withType<Zip>().configureEach {
 // Release nie gegen die lokale IDE bauen: 1.11.1 war gegen 2026.3 gebaut und lief unter 2026.1/2026.2 nicht
 // (FileEditorManager.Companion, 2026-11-22). Vor dem Veröffentlichen local.properties wegbenennen.
 tasks.named("publishPlugin") {
+    // Plain value, not the script variable: doFirst must not reference the script (configuration cache).
+    val localPlatform = platformLocalPath != null
     doFirst {
-        if (platformLocalPath != null) throw GradleException(
+        if (localPlatform) throw GradleException(
             "platformLocalPath is set (local.properties): rename local.properties and rebuild against platformVersion before publishing."
         )
     }
