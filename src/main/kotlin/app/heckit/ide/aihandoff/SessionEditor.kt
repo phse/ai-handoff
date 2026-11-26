@@ -60,6 +60,8 @@ class SessionFile(val tab: String?, val sessionId: String?, restoredTranscript: 
     init { isWritable = false }
     /** Claude arbeitet gerade - der Reiter zeigt dann einen Spinner statt des Handoff-Symbols ([SessionIconProvider]). */
     @Volatile var busy: Boolean = false
+    /** Mit `claude --resume` gestartet, die Session hat sich noch nicht gemeldet: Reiter zeigt "Resuming session…" mit Spinner. */
+    @Volatile var resuming: Boolean = false
     /** Arbeitsordner der Session - auch außerhalb des Projekts möglich ("New Claude Session in Folder…"). */
     @Volatile var cwd: String? = restoredCwd
     /** Titel der Session (von Claude Code vergeben), für den Reiter. */
@@ -175,7 +177,7 @@ class SessionTabTitleProvider : EditorTabTitleProvider, DumbAware {
             val dir = f.cwd?.trimEnd('/')?.takeIf { it != project.basePath?.trimEnd('/') }?.let { " (" + File(it).name + ")" } ?: ""
             // Das Handoff-Symbol zeigt schon, dass es eine Claude-Session ist.
             // Punkt vorne: Die Session wartet auf dich (Karte, Freigabe, Rückfrage) - auch wenn der Reiter nicht vorne ist.
-            (if (SessionEditors.needsYou(project, f)) "● " else "") + (f.title?.let { StringUtil.shortenTextWithEllipsis(it, 40, 0) } ?: "New Session") + dir
+            (if (SessionEditors.needsYou(project, f)) "● " else "") + (f.title?.let { StringUtil.shortenTextWithEllipsis(it, 40, 0) } ?: if (f.resuming) "Resuming session…" else "New Session") + dir
         }
 
     override fun getEditorTabTooltipHtml(project: Project, file: VirtualFile): com.intellij.openapi.util.text.HtmlChunk? =
@@ -200,9 +202,9 @@ object SessionEditors {
         }
 
     /** Schon offenen Reiter der Session zeigen, sonst einen neuen öffnen. */
-    fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true, cwd: String? = null) {
+    fun open(project: Project, tab: String?, sessionId: String?, focus: Boolean = true, cwd: String? = null, resuming: Boolean = false) {
         val open = openTab(project, tab, sessionId)
-        OpenFileDescriptor(project, open ?: SessionFile(tab, sessionId, restoredCwd = cwd)).navigate(focus)
+        OpenFileDescriptor(project, open ?: SessionFile(tab, sessionId, restoredCwd = cwd).also { it.resuming = resuming }).navigate(focus)
         if (focus) com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
     }
 
@@ -262,7 +264,7 @@ object SessionEditors {
             return false
         }
         sessions.start()
-        open(project, tab, null, cwd = dir ?: project.basePath)
+        open(project, tab, null, cwd = dir ?: project.basePath, resuming = command.startsWith("claude --resume"))
         return true
     }
 
@@ -600,6 +602,16 @@ object SessionLinks {
             out.append(html, last, m.range.first).append(a(target, m.value)); last = m.range.last + 1
         }
         return if (last == 0) html else out.append(html, last, html.length).toString()
+    }
+
+    /** Tooltip für Datei- und Ordner-Links: Pfad relativ zum Projekt, außerhalb absolut; mit Zeile, wenn der Link eine hat. */
+    fun pathTip(project: Project, link: String, base: String?): String? {
+        val f = fileOf(link, base) ?: return null
+        val line = resolve(link.removePrefix("file://"), base)?.second
+        val root = project.basePath?.let { File(it).canonicalFile }
+        val abs = runCatching { f.canonicalFile }.getOrDefault(f.absoluteFile)
+        val shown = root?.let { r -> abs.relativeToOrNull(r)?.path?.takeIf { !it.startsWith("..") } }?.ifEmpty { "." } ?: abs.path
+        return if (line != null) "$shown:$line" else shown
     }
 
     /** Was ein Link ist: Datei bzw. Ordner, Web-Adresse oder IDE-Ziel. */
@@ -1061,15 +1073,20 @@ private class SessionEditor(private val project: Project, private val file: Sess
             }
             SessionLinks.open(project, link, baseDir())
         }
-        // Tooltip für vorgeschlagene Slash-Befehle (Swing-HTML zeigt kein title-Attribut an).
+        // Tooltips für Slash-Befehle und Datei-Links (Swing-HTML zeigt kein title-Attribut an).
         addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+            private var tipHref: String? = null
+            private var tipText: String? = null
             override fun mouseMoved(e: java.awt.event.MouseEvent) {
                 val href = linkAt(e.point)
                 val tip = when {
                     href?.startsWith(RUN_LINK) == true -> "Run now"
                     href?.startsWith(PROMPT_LINK) == true -> "Use as prompt"
                     href?.startsWith(REWIND_LINK) == true -> "Rewind to before this prompt…"
-                    else -> null
+                    href == null || href.startsWith(STEPS_LINK) || href.startsWith(TOOL_LINK) || href == MORE_LINK ||
+                        href.startsWith(COPY_LINK) -> null
+                    // Datei-/Ordner-Links: Pfad zeigen; das Dateisystem nur abfragen, wenn sich der Link ändert.
+                    else -> if (href == tipHref) tipText else SessionLinks.pathTip(project, href, baseDir()).also { tipHref = href; tipText = it }
                 }
                 if (tip != toolTipText) toolTipText = tip
             }
@@ -1558,7 +1575,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
     private val send = JButton("Send").apply {
         primary()
-        addActionListener { val id = sessionId; if (resumable && id != null) SessionEditors.resume(project, file, id, expanded()) else send() }
+        addActionListener { val id = sessionId; if (resumable && id != null) resumeHere(id, expanded()) else send() }
     }
     /** Liste der Slash-Befehle: ausführen oder an der Schreibmarke in den Prompt übernehmen. */
     private val commands = SmallButton("/").apply {
@@ -1948,8 +1965,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         SwingUtilities.invokeLater { logInputState("after send") }
         // Session läuft nicht mehr (z. B. nach einem IDE-Neustart): fortsetzen und den Prompt gleich mitgeben.
         val id = sessionId
-        if (resumable && id != null && !(file.tab != null && terminalOpen) && !(sessions.canReply(id))) {
-            SessionEditors.resume(project, file, id, text); return
+        if (resumable && id != null && !(file.tab != null && terminalOpen && !exited(id)) && !(sessions.canReply(id))) {
+            resumeHere(id, text); return
         }
         val tab = file.tab
         // Steht im Terminal schon Text (z. B. ein "@datei" von „Send to Claude Code“), ginge er mit diesem Prompt ab: erst warnen,
@@ -2040,7 +2057,14 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Neue Session im selben Terminal (nach /clear): Protokoll wechseln.
         val path = (info?.transcript ?: file.transcript)?.let { relocated(it, id) }
         if (path != null && file.transcript != path) { file.transcript = path; SessionEditors.save(project) }
-        if (path != null && transcript?.path != path) { transcript = Transcript(path); loading = false; renderTranscript(force = true) }
+        if (path != null && transcript?.path != path) {
+            // Andere Session im Reiter (neues `claude`, /clear): Vorgemerktes gehörte zur alten und kommt dort nie an.
+            // pendingBase zählte die alte Datei - in der neuen wurde es nie erreicht, "Running…" klebte (2026-11-26).
+            if (transcript?.path?.let { File(it).nameWithoutExtension } != File(path).nameWithoutExtension) {
+                pending.clear(); sentNow.clear(); startedIdle.clear(); pendingBase = 0
+            }
+            transcript = Transcript(path); loading = false; renderTranscript(force = true)
+        }
         // Einlesen im Hintergrund - das erste Lesen eines langen Protokolls dauert.
         val t = transcript
         if (t != null && !loading) {
@@ -2295,17 +2319,38 @@ private class SessionEditor(private val project: Project, private val file: Sess
         return transcript?.background?.values?.toList().orEmpty()
     }
 
+    /** Sessions, die in diesem Reiter schon liefen - nur dann heißt "keine Hook-Daten mehr", dass Claude beendet ist. */
+    private val seenRunning = mutableSetOf<String>()
+    private fun exited(id: String?): Boolean {
+        if (id == null) return false
+        if (id in sessions.infos) { seenRunning += id; return false }
+        return id in seenRunning
+    }
+
+    /** Fortsetzen: im eigenen Terminal, wenn dort nur noch die Shell läuft, sonst in einem neuen. */
+    private fun resumeHere(id: String, prompt: String? = null) {
+        val tab = file.tab
+        if (tab != null && terminalOpen && exited(id)) {
+            val arg = prompt?.trim()?.takeIf { it.isNotEmpty() }?.let { " '" + it.replace("'", "'\\''") + "'" }.orEmpty()
+            if (SessionTerminals.send(project, tab, "claude --resume $id$arg")) { input.text = ""; seenRunning -= id; return }
+        }
+        SessionEditors.resume(project, file, id, prompt)
+    }
+
     /** Kopfzeile, Rückfrage und Eingabe nach dem Zustand der Session; nur neu aufbauen, wenn er sich ändert. */
     private fun updateState(id: String?) {
         val waiting = sessions.waiting(id)
         val working = sessions.workingOn(id)
         val tab = file.tab
-        val terminal = terminalOpen
+        // Claude beendet, Terminal steht noch (Shell, z. B. nach /logout oder /exit): wie ohne Terminal - Resume statt
+        // Send, sonst ging der Prompt an die Shell (2026-11-26).
+        val shellOnly = terminalOpen && exited(id)
+        val terminal = terminalOpen && !shellOnly
         val canSend = terminal || (id != null && sessions.canReply(id))
         // ConcurrentHashMap: `null in set` wirft.
         val wasSent = id != null && id in sessions.sent
         val tasks = backgroundTasks().size
-        val key = listOf(id, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks).joinToString("|")
+        val key = listOf(id, shellOnly, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks).joinToString("|")
         if (key == stateKey) return
         stateKey = key
 
@@ -2315,6 +2360,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             working != null || wasSent -> "Claude is working…" + (working?.let { " since ${time.format(Date(it.since))}" } ?: "") to JBColor(0x5A9E6F, 0x6FBF85)
             tab != null && !terminal -> "Terminal closed" to UIUtil.getContextHelpForeground()
             id != null && id !in sessions.infos -> "Not running" to UIUtil.getContextHelpForeground()
+            id == null && terminal && file.resuming -> "Resuming session…" to UIUtil.getContextHelpForeground()
             id == null && terminal -> "Starting Claude…" to UIUtil.getContextHelpForeground()
             else -> "Ready" to UIUtil.getContextHelpForeground()
         }
@@ -2323,7 +2369,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
         status.foreground = color
         // Fertig/wartend geht vor: Ein noch gemerktes "gesendet" ließ den Spinner im Reiter und in der Navigationsleiste
         // (dort als Strich) weiterlaufen, obwohl die Kopfzeile "Claude is done" zeigte (2026-11-18).
-        val isBusy = waiting == null && (working != null || wasSent)
+        // Session meldet sich (Hook mit ID): Laden ist vorbei.
+        if (id != null && file.resuming) { file.resuming = false; updateTabTitle() }
+        val loading = file.resuming && terminal
+        val isBusy = waiting == null && (working != null || wasSent || loading)
+        busy.text = if (loading && working == null && !wasSent) "Resuming session…" else "Claude is working…"
         if (file.busy != isBusy) { file.busy = isBusy; updateTabTitle() }
         if (busy.isVisible != isBusy) { busy.isVisible = isBusy; conversation.revalidate(); if (isBusy) scrollToEnd() }
 
@@ -2335,7 +2385,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // Session läuft nicht mehr (Terminal zu, IDE neu gestartet): im neuen Terminal fortsetzen.
         // Läuft sie doch noch anderswo (z. B. iTerm), entstünde ein zweiter Strang - deshalb nur, wenn nicht gerade gearbeitet wird.
         resumable = !terminal && id != null && working == null && !wasSent && SessionTerminals.available
-        if (resumable && !file.logOnly) headerLinks.add(ActionLink("Resume in Terminal") { SessionEditors.resume(project, file, id!!) })
+        if (resumable && !file.logOnly) headerLinks.add(ActionLink("Resume in Terminal") { resumeHere(id!!) })
         headerLinks.revalidate(); headerLinks.repaint()
 
         question.removeAll()
@@ -2403,6 +2453,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             argHint != null -> argHint!!
             terminal -> "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
+            resumable && shellOnly -> "Claude Code has exited in its terminal. Resume continues this session there (claude --resume)."
             resumable && tab != null -> "Terminal tab not found. Still running there? Type /show-in-editor in it. Otherwise Resume (claude --resume)."
             resumable -> "Not running in the IDE terminal. Resume continues it there (claude --resume); only if it is not still open elsewhere."
             id == null && tab == null -> "Session not found."

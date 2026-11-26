@@ -69,6 +69,15 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.11.4</h3>
+            <ul>
+              <li>Fix: after an API error (e.g. "Login reached its time limit") the tab no longer stays on "Claude is working…".</li>
+              <li>Sessions in a Handoff tab get a short reminder with every prompt to hand over commands, questions, test steps
+                  and reviews as cards.</li>
+              <li>File and folder links show their path as tooltip (relative inside the project, absolute outside).</li>
+              <li>Resuming a session: the tab shows "Resuming session…" with the spinner until it has loaded.</li>
+              <li>Resume Claude Session dialog: filter field (title, first prompt, folder).</li>
+            </ul>
             <h3>1.11.3</h3>
             <ul>
               <li>Fix: a "%" in a message (e.g. SQL <code>LIKE '/x/%'</code>) stopped the session tab from updating; a

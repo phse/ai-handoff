@@ -69,6 +69,20 @@ object WaitingHook {
     }
 
     /**
+     * Kurze Erinnerung bei jedem Prompt (UserPromptSubmit) in Sessions im Handoff-Reiter: Der SessionStart-Hinweis steht weit
+     * oben und greift gegen Ende langer Antworten schwach, Befehle landeten trotzdem als Codeblock (2026-11-26).
+     * Keine Anführungszeichen (steht in JSON in einem printf).
+     */
+    private fun promptHint(): String? {
+        val denied = runCatching { Permissions.denied() }.getOrDefault(emptySet())
+        val tools = listOf("handoff_propose_command", "handoff_ask", "handoff_checklist", "handoff_request_review")
+            .filter { it !in denied }
+        if (tools.isEmpty() || "handoff_wait_for_result" in denied) return null
+        return "Handoff tab: commands for the user, option questions, manual test steps and reviews go as cards (" +
+            tools.joinToString(", ") + "), not as text; load them via ToolSearch (query handoff) if deferred."
+    }
+
+    /**
      * Ereignis → Argument des Skripts und Filter. Bei Notification nur, was eine Eingabe braucht (idle_prompt deckt Stop schon ab).
      * Stop läuft als asyncRewake-Hook im Hintergrund: Er legt die Datei ab und wartet auf eine Antwort aus der IDE
      * (`<id>.reply`). Kommt eine, gibt er sie auf stderr aus und endet mit Code 2 - Claude Code weckt die Session dann mit
@@ -77,6 +91,9 @@ object WaitingHook {
     private val EVENTS = listOf(
         Triple("SessionStart", "start", null),
         Triple("Stop", "listen", null),
+        // Turn endet an einem API-Fehler ("Login reached its time limit · Please run /login"): Stop kommt dann nicht, der
+        // Reiter zeigte weiter "Claude is working…" und reihte /login als "Queued" ein (2026-11-24).
+        Triple("StopFailure", "failed", null),
         Triple("Notification", "wait", "permission_prompt|elicitation_dialog|agent_needs_input"),
         Triple("UserPromptSubmit", "busy", null),
         // Fragen von Claude Code (AskUserQuestion) in Sessions im Handoff-Reiter: im Reiter beantworten statt im Terminal.
@@ -188,9 +205,12 @@ object WaitingHook {
         |      exit 0
         |    fi
         |    printf '%s' "${'$'}input" > "${'$'}f.btmp" && mv "${'$'}f.btmp" "${'$'}f.busy"
+        |    # Sessions shown in a Handoff tab: a short reminder next to every prompt to hand things over as cards.
+        |${promptHint()?.let { "    [ -n \"${'$'}HANDOFF_TAB\" ] || [ -f \"${'$'}f.tab\" ] && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$it\"}}'" } ?: "    :"}
         |    exit 0 ;;
         |esac
         |printf '%s' "${'$'}input" > "${'$'}f.tmp" && mv "${'$'}f.tmp" "${'$'}f.json"
+        |[ "${'$'}1" = "failed" ] && { rm -f "${'$'}f.busy"; exit 0; }
         |[ "${'$'}1" = "listen" ] || exit 0
         |rm -f "${'$'}f.busy"
         |echo ${'$'}${'$'} > "${'$'}f.listen"
@@ -492,11 +512,12 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
             val cwd = o.str("cwd")?.trimEnd('/') ?: return@mapNotNull null
             if (!inProject(cwd) && f.name.removeSuffix(".json") !in own) return@mapNotNull null
             if (f.name.removeSuffix(".json") in foreign) return@mapNotNull null
-            val finished = o.str("hook_event_name") == "Stop"
+            val event = o.str("hook_event_name")
+            val finished = event == "Stop" || event == "StopFailure"
             // Nach einer Freigabe im Terminal arbeitet Claude weiter, ohne dass ein Hook die Datei löscht: Das Protokoll
             // der Session ist dann jünger als die Meldung.
             if (!finished && (o.str("transcript_path")?.let { File(it).lastModified() } ?: 0L) > at + 5000) return@mapNotNull null
-            WaitingSession(f, at, cwd, finished, (if (finished) o.str("last_assistant_message") else o.str("message")).orEmpty().trim(), o.str("notification_type"))
+            WaitingSession(f, at, cwd, finished, (if (finished) o.str("last_assistant_message") ?: o.str("error") else o.str("message")).orEmpty().trim(), o.str("notification_type"))
         }.sortedByDescending { it.at }
 
         val waitingIds = found.map { it.id }.toSet()

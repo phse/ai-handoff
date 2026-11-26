@@ -147,9 +147,17 @@ object PastSessions {
     private fun JsonObject.str(k: String) = get(k)?.takeIf { it.isJsonPrimitive }?.asString
 }
 
-private class ResumeDialog(private val project: Project, sessions: List<PastSession>) : DialogWrapper(project) {
+private class ResumeDialog(private val project: Project, private val sessions: List<PastSession>) : DialogWrapper(project) {
     private val time = SimpleDateFormat("dd.MM. HH:mm")
-    private val list = JBList(sessions).apply {
+    private val model = com.intellij.ui.CollectionListModel(sessions)
+    /** Filter wie in den Dialogen der IDE: tippen grenzt ein, Pfeiltasten und Enter wirken weiter auf die Liste. */
+    private val filter = com.intellij.ui.SearchTextField(false).apply {
+        textEditor.emptyText.text = "Filter by title, prompt or folder"
+        addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
+            override fun textChanged(e: javax.swing.event.DocumentEvent) = applyFilter()
+        })
+    }
+    private val list = JBList(model).apply {
         selectionMode = ListSelectionModel.SINGLE_SELECTION
         selectedIndex = 0
         cellRenderer = object : ColoredListCellRenderer<PastSession>() {
@@ -169,15 +177,36 @@ private class ResumeDialog(private val project: Project, sessions: List<PastSess
     }
     val selected: PastSession? get() = list.selectedValue
 
+    private fun applyFilter() {
+        val words = filter.text.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        model.replaceAll(sessions.filter { s ->
+            val text = listOfNotNull(s.title, s.firstPrompt, s.cwd).joinToString(" ").lowercase()
+            words.all { it in text }
+        })
+        if (model.size > 0) list.selectedIndex = 0
+        isOKActionEnabled = model.size > 0
+    }
+
     init {
         title = "Resume Claude Session"
         setOKButtonText("Resume")
         object : DoubleClickListener() {
             override fun onDoubleClick(event: MouseEvent): Boolean { if (selected != null) doOKAction(); return true }
         }.installOn(list)
+        // Pfeiltasten im Filterfeld bewegen die Auswahl in der Liste.
+        filter.textEditor.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                if (e.keyCode != java.awt.event.KeyEvent.VK_UP && e.keyCode != java.awt.event.KeyEvent.VK_DOWN || model.size == 0) return
+                val i = (list.selectedIndex + if (e.keyCode == java.awt.event.KeyEvent.VK_UP) -1 else 1).coerceIn(0, model.size - 1)
+                list.selectedIndex = i; list.ensureIndexIsVisible(i); e.consume()
+            }
+        })
         init()
     }
 
-    override fun createCenterPanel(): JComponent = JBScrollPane(list).apply { preferredSize = JBUI.size(720, 420) }
-    override fun getPreferredFocusedComponent(): JComponent = list
+    override fun createCenterPanel(): JComponent = javax.swing.JPanel(java.awt.BorderLayout(0, JBUI.scale(6))).apply {
+        add(filter, java.awt.BorderLayout.NORTH)
+        add(JBScrollPane(list).apply { preferredSize = JBUI.size(720, 420) }, java.awt.BorderLayout.CENTER)
+    }
+    override fun getPreferredFocusedComponent(): JComponent = filter.textEditor
 }
