@@ -99,6 +99,14 @@ is waiting. Notifications can be switched off in the operating system's settings
 
 ## What Claude can hand over
 
+Claude waits for your answer on every card: when `handoff_wait_for_result` returns "pending", it calls it again instead of
+moving on. If you would rather have Claude carry on and get your answer later (it then arrives as "Result of hN …"),
+put a line like this in your CLAUDE.md:
+
+```
+Handoff cards: after one "pending" from handoff_wait_for_result you may end your turn; I answer later.
+```
+
 ### Commands you run yourself
 
 Claude proposes a command; it appears as a card with the reason and the working directory. **Run** executes it in the
@@ -468,6 +476,12 @@ you want: **Send to Claude** hands the prompt to a Claude Code session of this p
 ## Version history
 
 <!-- Newest version first. The first line under a version heading is shown as a one-line notice after an update. -->
+
+### 1.12.0
+
+Permission prompts and MCP server questions as cards in the session tab, and **Send to Claude Session** in the context
+menu of database results (selected rows as a file, to this or any other session). Claude now keeps waiting for your
+answer on cards; notices below the input are colored and fade out.
 
 ### 1.11.0
 

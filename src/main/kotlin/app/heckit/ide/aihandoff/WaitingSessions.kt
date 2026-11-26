@@ -98,6 +98,10 @@ object WaitingHook {
         Triple("UserPromptSubmit", "busy", null),
         // Fragen von Claude Code (AskUserQuestion) in Sessions im Handoff-Reiter: im Reiter beantworten statt im Terminal.
         Triple("PreToolUse", "ask", "AskUserQuestion"),
+        // Freigaben ("Allow …?") und Rückfragen von MCP-Servern (z. B. PhpStorm: "Allow Claude Code to Read Database Data")
+        // ebenso als Karte - sonst stand im Reiter nur "Claude Code needs your input" (2026-11-26).
+        Triple("PermissionRequest", "ask", null),
+        Triple("Elicitation", "ask", null),
         // Aufrufe der Handoff-Werkzeuge: Der MCP-Aufruf selbst sagt nicht, welche Session ihn schickt - der Hook schon. So
         // landet die Karte im richtigen Session-Reiter statt in einem geratenen (2026-11-19, „Karten vogelwild“).
         Triple("PreToolUse", "tool", "mcp__.*__handoff_.*"),
@@ -188,10 +192,15 @@ object WaitingHook {
         |    trap 'rm -f "${'$'}f.ask"' EXIT
         |    printf '%s' "${'$'}input" > "${'$'}f.qtmp" && mv "${'$'}f.qtmp" "${'$'}f.ask"
         |    end=${'$'}(( ${'$'}(date +%s) + $ASK_SECONDS - 30 ))
+        |    # Permission dialogs also show in the terminal: answered there, the transcript grows - then the card is stale.
+        |    tp=${'$'}(printf '%s' "${'$'}input" | tr -d '\n' | grep -o '"transcript_path" *: *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"${'$'}/\1/')
+        |    size() { [ -n "${'$'}tp" ] && [ -f "${'$'}tp" ] && wc -c < "${'$'}tp" | tr -d ' '; }
+        |    sleep 1; start=${'$'}(size)
         |    while [ ${'$'}(date +%s) -lt ${'$'}end ]; do
         |      if [ -f "${'$'}f.answer" ]; then cat "${'$'}f.answer"; rm -f "${'$'}f.answer"; exit 0; fi
         |      [ -f "${'$'}f.ask" ] || exit 0
         |      alive || exit 0
+        |      [ "${'$'}1" = "ask" ] && [ -n "${'$'}start" ] && [ "${'$'}(size)" != "${'$'}start" ] && grep -Eq '"hook_event_name" *: *"(PermissionRequest|Elicitation)"' "${'$'}f.ask" && exit 0
         |      sleep 0.5
         |    done
         |    exit 0 ;;
@@ -257,8 +266,14 @@ object WaitingHook {
 
     /** Nach einem Plugin-Update: eingerichtete Hooks auf den Stand dieser Version bringen. */
     fun upgradeIfNeeded() {
-        if (script.isFile && (script.readText() != SCRIPT || !command.isFile) && isInstalled()) install()
+        if (script.isFile && (script.readText() != SCRIPT || !command.isFile || !hasAllEvents()) && isInstalled()) install()
     }
+
+    /** Neue Ereignisse (z. B. PermissionRequest, Elicitation) kommen sonst erst mit einem geänderten Skript in die Einstellungen. */
+    private fun hasAllEvents(): Boolean = runCatching {
+        val hooks = PlanLimits.readSettings().getAsJsonObject("hooks") ?: return@runCatching false
+        EVENTS.map { it.first }.distinct().all { e -> hooks.getAsJsonArray(e)?.any { it.isJsonObject && it.asJsonObject.isOurs() } == true }
+    }.getOrDefault(true)
 
     fun uninstall() {
         PlanLimits.writeSettings(PlanLimits.readSettings().also(::removeFrom))
@@ -538,6 +553,7 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         // Lebenszeichen für den Frage-Hook: Ohne laufende IDE fragt Claude Code gleich im Terminal.
         runCatching { File(WaitingHook.waiting, ".alive").let { if (!it.exists()) it.createNewFile(); it.setLastModified(now) } }
         pollAsks(byName, newInfos)
+        pollMentions(byName)
 
         // `/show-in-editor`: Session im Editor-Reiter zeigen.
         byName.values.filter { it.name.endsWith(".open") }.forEach { f ->
@@ -570,6 +586,26 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
     /** Offene Fragen von Claude Code je Session: Karte und die Eingabe des Werkzeugs (für die Antwort). */
     private val asks = java.util.concurrent.ConcurrentHashMap<String, Pair<Proposal, JsonObject>>()
 
+    /**
+     * Dateien, die eine andere IDE (oder ein anderes Projekt) für eine Session dieses Projekts abgelegt hat (`<id>.mention`,
+     * z. B. ein Datenbank-Ergebnis aus DataGrip): als `@`-Marke ins Eingabefeld ihres Reiters (2026-11-26).
+     */
+    private fun pollMentions(byName: Map<String, File>) {
+        val files = byName.values.filter { it.name.endsWith(".mention") }
+        if (files.isEmpty()) return
+        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({
+            val tabs = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFiles.filterIsInstance<SessionFile>()
+            for (f in files) {
+                val id = f.name.removeSuffix(".mention")
+                val tab = tabs.firstOrNull { it.currentSession(project) == id } ?: continue
+                val o = read(f) ?: continue
+                if (!f.delete()) continue
+                SessionEditors.insertMention(project, tab, o.str("path") ?: continue, o.str("label"))
+                com.intellij.ide.impl.ProjectUtil.focusProjectWindow(project, true)
+            }
+        }, project.disposed)
+    }
+
     private fun pollAsks(byName: Map<String, File>, infos: Map<String, SessionInfo>) {
         val service = HandoffService.getInstance(project)
         val open = byName.values.filter { it.name.endsWith(".ask") }.associateBy { it.name.removeSuffix(".ask") }
@@ -577,8 +613,30 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
         asks.keys.filter { it !in open }.forEach { id -> asks.remove(id)?.first?.takeIf { it.isPending }?.let(service::drop) }
         for ((id, f) in open) {
             if (asks.containsKey(id) || id !in infos) continue
-            val input = read(f)?.getAsJsonObject("tool_input") ?: continue
-            val questions = runCatching {
+            val hook = read(f) ?: continue
+            val event = hook.str("hook_event_name") ?: "PreToolUse"
+            val (title, questions) = when (event) {
+                "PermissionRequest" -> permissionCard(hook)
+                "Elicitation" -> elicitationCard(hook)
+                else -> "Claude Code asks" to askQuestions(hook.getAsJsonObject("tool_input") ?: continue)
+            } ?: continue
+            if (questions.isEmpty()) continue
+            val input = hook
+            val placeholder = Proposal("", "", "", "", false)
+            asks[id] = placeholder to input
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({
+                val p = service.proposeAsk(title, questions, askSession = id)
+                if (asks[id]?.first === placeholder) asks[id] = p to input else { service.drop(p); return@invokeLater }
+                p.done.invokeOnCompletion {
+                    if (p.state == Proposal.State.FINISHED) answer(id, event, input, p) else if (asks[id]?.first === p) File(WaitingHook.waiting, "$id.ask").delete()
+                    asks.remove(id)
+                }
+                SessionEditors.revealCards(project, p)
+            }, project.disposed)
+        }
+    }
+
+    private fun askQuestions(input: JsonObject): List<AskQuestion> = runCatching {
                 input.getAsJsonArray("questions").map { q ->
                     val o = q.asJsonObject
                     val header = o.str("header")?.takeIf { it.isNotBlank() }
@@ -588,19 +646,85 @@ class WaitingSessions(private val project: Project, private val scope: Coroutine
                         o.get("multiSelect")?.asBoolean == true,
                     )
                 }
-            }.getOrNull()?.takeIf { it.isNotEmpty() } ?: continue
-            val placeholder = Proposal("", "", "", "", false)
-            asks[id] = placeholder to input
-            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({
-                val p = service.proposeAsk("Claude Code asks", questions, askSession = id)
-                if (asks[id]?.first === placeholder) asks[id] = p to input else { service.drop(p); return@invokeLater }
-                p.done.invokeOnCompletion {
-                    if (p.state == Proposal.State.FINISHED) answerAsk(id, input, p) else if (asks[id]?.first === p) File(WaitingHook.waiting, "$id.ask").delete()
-                    asks.remove(id)
+            }.getOrNull().orEmpty()
+
+    /** Freigabe-Abfrage (PermissionRequest): Werkzeug und Eingabe zeigen, Allow/Deny; eigener Text = Grund fürs Ablehnen. */
+    private fun permissionCard(hook: JsonObject): Pair<String, List<AskQuestion>>? {
+        val tool = hook.str("tool_name") ?: return null
+        val input = hook.getAsJsonObject("tool_input")
+        val detail = input?.let { i -> i.str("command") ?: i.str("file_path") ?: i.str("url") ?: i.str("query") ?: i.toString() }.orEmpty()
+        val shown = com.intellij.openapi.util.text.StringUtil.shortenTextWithEllipsis(detail, 1500, 0)
+        val q = "**${tool.removePrefix("mcp__")}**" + (i(hook.str("description"))?.let { " · $it" } ?: "") +
+            // Inline-Code statt Codeblock: Die Karte stellte ``` nicht dar (2026-11-26).
+            (if (shown.isNotBlank()) "\n\n`" + shown.replace('`', '\'').replace("\n", " ") + "`" else "")
+        return "Claude Code asks for permission" to listOf(AskQuestion(q, listOf(AskOption("Allow", "Run it this time"), AskOption("Deny", "Own answer: tell Claude why")), false))
+    }
+
+    private fun i(s: String?) = s?.trim()?.takeIf { it.isNotEmpty() }
+
+    /**
+     * Rückfrage eines MCP-Servers (Elicitation): je Feld des Formulars eine Frage (Auswahl bei enum/boolean, sonst eigener Text),
+     * zuletzt Accept/Decline.
+     */
+    private fun elicitationCard(hook: JsonObject): Pair<String, List<AskQuestion>>? {
+        val server = hook.str("mcp_server_name") ?: "MCP server"
+        val message = i(hook.str("message")) ?: "requests your input"
+        val props = hook.getAsJsonObject("requested_schema")?.getAsJsonObject("properties")
+        val fields = props?.entrySet()?.mapNotNull { (key, v) ->
+            val o = v.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+            val label = i(o.str("title")) ?: key
+            val desc = i(o.str("description"))
+            val options = when {
+                o.get("enum")?.isJsonArray == true -> o.getAsJsonArray("enum").mapIndexed { n, e ->
+                    AskOption(o.getAsJsonArray("enumNames")?.get(n)?.asString ?: e.asString) }
+                o.str("type") == "boolean" -> listOf(AskOption("Yes"), AskOption("No"))
+                else -> emptyList()
+            }
+            AskQuestion("**$label**" + (desc?.let { " · $it" } ?: "") + (if (options.isEmpty()) " (own answer)" else ""), options, false)
+        }.orEmpty()
+        return "$server asks" to fields + AskQuestion("**$server** · $message", listOf(AskOption("Accept"), AskOption("Decline")), false)
+    }
+
+    private fun answer(id: String, event: String, hook: JsonObject, p: Proposal) {
+        val out = when (event) {
+            "PermissionRequest" -> {
+                val q = p.questions.first()
+                val allow = 0 in q.picked && q.own.isBlank()
+                JsonObject().apply { add("hookSpecificOutput", JsonObject().apply {
+                    addProperty("hookEventName", "PermissionRequest")
+                    add("decision", JsonObject().apply {
+                        addProperty("behavior", if (allow) "allow" else "deny")
+                        if (!allow) addProperty("message", i(q.own) ?: "Denied in the IDE (Handoff)")
+                    })
+                }) }
+            }
+            "Elicitation" -> {
+                val props = hook.getAsJsonObject("requested_schema")?.getAsJsonObject("properties")
+                val keys = props?.keySet()?.toList().orEmpty()
+                val last = p.questions.last()
+                val accept = 0 in last.picked
+                val content = JsonObject()
+                keys.forEachIndexed { n, key ->
+                    val q = p.questions.getOrNull(n) ?: return@forEachIndexed
+                    val o = props!!.getAsJsonObject(key)
+                    when {
+                        o.get("enum")?.isJsonArray == true -> q.picked.firstOrNull()?.let { content.add(key, o.getAsJsonArray("enum").get(it)) }
+                        o.str("type") == "boolean" -> q.picked.firstOrNull()?.let { content.addProperty(key, it == 0) }
+                        o.str("type") == "number" || o.str("type") == "integer" -> q.own.trim().toDoubleOrNull()?.let { content.addProperty(key, it) }
+                        else -> i(q.own)?.let { content.addProperty(key, it) }
+                    }
                 }
-                SessionEditors.revealCards(project, p)
-            }, project.disposed)
+                JsonObject().apply { add("hookSpecificOutput", JsonObject().apply {
+                    addProperty("hookEventName", "Elicitation")
+                    addProperty("action", if (accept) "accept" else "decline")
+                    if (accept) add("content", content)
+                }) }
+            }
+            else -> { answerAsk(id, hook.getAsJsonObject("tool_input"), p); return }
         }
+        val tmp = File(WaitingHook.waiting, "$id.atmp")
+        tmp.writeText(out.toString())
+        tmp.renameTo(File(WaitingHook.waiting, "$id.answer"))
     }
 
     /** Antwort für den Hook: Werkzeug freigeben, mit den Antworten in der Eingabe (wie die Agent-SDK es vorsieht). */

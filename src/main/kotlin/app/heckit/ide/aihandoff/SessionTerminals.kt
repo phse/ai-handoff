@@ -225,7 +225,14 @@ class TerminalBridge(private val project: Project) {
             if (lineStart < 0) continue
             val line = all.substring(lineStart).substringBefore('\n')
             val text = line.trimStart().removePrefix("❯").replace(' ', ' ').trim().trim('│').trim().takeIf { it.isNotEmpty() } ?: return null
-            val inputAt = lineStart + line.indexOf('❯') + 2
+            // Ein Hinweis wie "[⧉ 1 line selected] " vorne ist kein Text: Claude Code setzt den Cursor dahinter, auch bei einem
+            // Vorschlag. Ab "❯ " gemessen galt der Vorschlag dann als getippt - er kam nicht in den Reiter und löste die Warnung
+            // "terminal input already holds" aus (2026-11-26, Bildschirm: Cursor auf dem ersten Zeichen nach dem Hinweis).
+            val afterPrompt = line.indexOf('❯') + 2
+            val hint = EDITOR_HINTS.find(line.substring(afterPrompt.coerceAtMost(line.length)).replace('\u00a0', ' '))?.value?.length ?: 0
+            val inputAt = lineStart + afterPrompt + hint
+            // Nur der Cursor entscheidet, nicht die Farbe: Claude Code hat mehrere Farbschemata, ein grauer Vorschlag ist dort
+            // nicht immer grau (2026-11-26).
             return text to (tail.cursor != null && tail.cursor > inputAt)
         }
         return null

@@ -52,6 +52,10 @@ dependencies {
         // Claude-Sessions im Terminal der IDE starten und ihnen Eingaben schicken (neues Terminal, Modul frontend).
         bundledPlugin("org.jetbrains.plugins.terminal")
         bundledModule("intellij.terminal.frontend")
+        // Datenbank-Ergebnis an eine Session (optional, DataGrid aus dem Grid-Modul).
+        bundledModule("intellij.grid.impl")
+        bundledModule("intellij.grid.core.impl")
+        bundledModule("intellij.grid.types")
         // Ab 2026.3 liegt die VCS-API im eigenen Plugin - nur beim Bauen gegen eine lokale 2026.3 nötig (2026.2 hat es nicht).
         if (platformLocalPath != null && file("$platformLocalPath/Contents/plugins/platform-vcs-plugin").isDirectory) bundledPlugin("com.intellij.platform.vcs")
     }
@@ -69,6 +73,20 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.12.0</h3>
+            <ul>
+              <li>Permission prompts ("Allow Bash …?") and questions from MCP servers (e.g. PhpStorm's "Allow Claude Code to
+                  Read Database Data") as cards in the session tab; answered in the terminal, the card disappears.</li>
+              <li>Database results: <b>Send to Claude Session &lt;title&gt;</b> (last used tab) and <b>Send to Claude Session…</b>
+                  (any running session, also in other projects or IDEs). One row goes as a record, several as TSV.</li>
+              <li>Claude keeps waiting for your answer on cards instead of moving on (can be relaxed in your CLAUDE.md).</li>
+              <li>Notices below the input: warnings yellow, errors red, with icon; they fade after a few seconds (hover keeps them).</li>
+              <li>Checklist cards: note field focused on click; files can be dropped into all small card inputs.</li>
+              <li>Fix: 1.11.4 could not open a session tab of a running session (restore, reopen).</li>
+              <li>Fix: a prompt suggestion next to "[⧉ 1 line selected]" was taken for typed text (warning, not offered in the tab).</li>
+              <li>Fix: invisible characters (BOM, zero-width …) and a trailing @file made Claude Code swallow the Enter.</li>
+              <li>Fix: text already in the terminal input is joined with a space; the same prompt there is not sent twice.</li>
+            </ul>
             <h3>1.11.4</h3>
             <ul>
               <li>Fix: after an API error (e.g. "Login reached its time limit") the tab no longer stays on "Claude is working…".</li>

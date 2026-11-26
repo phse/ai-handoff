@@ -158,7 +158,10 @@ class Proposal(
         return when (state) {
             Proposal.State.PENDING if steps.any { it.exitCode != null } ->
                 "pending: ${steps.count { it.exitCode != null }} of ${steps.size} steps done, the user has not started the next one yet."
-            Proposal.State.PENDING -> "pending: the user has not acted yet."
+            // Hinweis gleich im Ergebnis: Claude beendete sonst nach einem "pending" die Runde, und die Antwort kam nur noch als
+            // nachgereichtes "Result of hN" (2026-11-26). Eigene Regeln in der CLAUDE.md gehen vor.
+            Proposal.State.PENDING -> "pending: the user has not acted yet. Call handoff_wait_for_result again and keep waiting " +
+                "(unless your CLAUDE.md says to move on)."
             Proposal.State.RUNNING if steps.isNotEmpty() -> {
                 val i = steps.indexOfFirst { it.running }
                 "running: step ${i + 1} of ${steps.size} is still running." + (steps.getOrNull(i)?.let { "\nOutput so far:\n${it.outputTail(20)}" } ?: "")
@@ -378,6 +381,9 @@ class HandoffService(private val project: Project) {
         p.done.invokeOnCompletion {
             javax.swing.Timer(DELIVER_AFTER_MS) {
                 // Nur an eine sicher bekannte Session - geraten landete das Ergebnis in einer fremden Session (2026-11-18).
+                // Karten zu Fragen/Freigaben von Claude Code beantwortet der Hook - ein später Prompt "Result of hN" verwirrte
+                // Claude nur (2026-11-26).
+                if (p.askSession != null) return@Timer
                 val id = p.owner ?: return@Timer
                 if (p.fetched || p.id in delivered || project.isDisposed) return@Timer
                 val text = "Result of ${p.id}, which you handed over earlier through Handoff (you were no longer waiting for it):\n" + p.resultText()

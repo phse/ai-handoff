@@ -106,7 +106,7 @@ object PastSessions {
         }
     }
 
-    private fun read(f: File): PastSession? {
+    fun read(f: File): PastSession? {
         var cwd: String? = null
         var title: String? = null
         var first: String? = null

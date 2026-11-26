@@ -1,0 +1,14 @@
+<idea-plugin>
+    <!-- Datenbank-Ergebnis an eine Claude-Session (nur mit dem Grid-Plugin, also Database Tools/DataGrip). -->
+    <actions>
+        <action id="app.heckit.ide.aihandoff.GridToClaude" class="app.heckit.ide.aihandoff.GridToClaudeAction"
+                text="Send to Claude Session" description="Write the selected rows (or all loaded rows) to a file and mention it in the Claude session tab used last"
+                icon="/icons/handoff.svg">
+            <add-to-group group-id="Console.TableResult.PopupGroup" anchor="last"/>
+        </action>
+        <action id="app.heckit.ide.aihandoff.GridToClaudeChoose" class="app.heckit.ide.aihandoff.GridToClaudeChooseAction"
+                text="Send to Claude Session…" description="Write the selected rows (or all loaded rows) to a file and mention it in a Claude session of any project or IDE">
+            <add-to-group group-id="Console.TableResult.PopupGroup" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

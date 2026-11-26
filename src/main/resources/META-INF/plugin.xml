@@ -71,6 +71,10 @@
     <!-- Knöpfe "New/Resume Claude Session…" im Home window ab 2026.3 (Modul intellij.platform.ide.nonModalWelcomeScreen, intern -
          nur über das Customization-Plugin der IDE erreichbar, das es mitbringt; laut intellij-community: IDEA und PyCharm).
          Rider hat das Fenster auch, sein Plugin ist nicht öffentlich. -->
+    <!-- Datenbank-Ergebnis an eine Claude-Session (Kontextmenü im Ergebnis). Das Grid-Plugin heißt bis 2026.2
+         intellij.grid.plugin, ab 2026.3 com.intellij.grid mit intellij.grid.plugin als Alias - beide Namen zusammen
+         luden die Datei zweimal ("ID is already taken", 2026-11-26). -->
+    <depends optional="true" config-file="handoff-grid.xml">intellij.grid.plugin</depends>
     <depends optional="true" config-file="handoff-welcome.xml">com.intellij.phpstorm.customization</depends>
     <depends optional="true" config-file="handoff-welcome-idea.xml">com.intellij.idea.customization</depends>
     <depends optional="true" config-file="handoff-welcome-pycharm.xml">intellij.pycharm.community.customization.shared</depends>

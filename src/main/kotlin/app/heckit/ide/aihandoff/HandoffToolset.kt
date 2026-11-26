@@ -91,7 +91,10 @@ class HandoffToolset : McpToolset {
         """
         |Waits until the user has run or dismissed a command proposed with handoff_propose_command and returns the outcome:
         |the command as actually run (the user may have edited it), exit code and the last lines of output, or the user's note
-        |when dismissed. Returns "pending" after the timeout; call it again to keep waiting.
+        |when dismissed. Works the same for reviews, questions, checklists, images and secrets.
+        |Returns "pending" after the timeout: then call it again right away and keep waiting until the result is there -
+        |do not end your turn or move on while the user has not answered (they may need minutes, e.g. for manual tests).
+        |Only if the user's own instructions (CLAUDE.md) allow moving on without waiting, follow those.
         """
     )
     suspend fun handoff_wait_for_result(

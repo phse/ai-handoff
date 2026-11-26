@@ -624,6 +624,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                     override fun textChanged(e: DocumentEvent) { p.noteDraft = text }
                 })
             }
+            dropFiles(note)
             val diff = JButton("Show Diff").apply { isEnabled = changes.isNotEmpty(); addActionListener { showDiff(changes, 0) } }
             // Mit Notizen (an Zeilen oder im Feld) ist es ein Änderungswunsch, sonst eine Freigabe.
             val finish = JButton(if (notes.isEmpty()) "Approve" else if (notes.size == 1) "Send 1 Note" else "Send ${notes.size} Notes").apply {
@@ -735,6 +736,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                     override fun textChanged(e: DocumentEvent) { sessions.drafts[s.id] = text }
                 })
             }
+            dropFiles(input)
             val send = JButton("Send").apply {
                 primary()
                 addActionListener { send(s, input) }
@@ -843,6 +845,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         val q = p.questions[p.page.coerceIn(0, n - 1)]
         val last = p.page >= n - 1
         val own = JBTextField(q.own).apply { emptyText.text = "Own answer (optional)" }
+        dropFiles(own)
         val next = JButton(if (last) "Submit" else "Next").apply { primary() }
         fun updateNext() { next.isEnabled = q.answered }
         body.add(markdown(q.question + if (q.multiSelect) "\n\n*Pick any.*" else ""))
@@ -902,6 +905,24 @@ internal class HandoffPanel(private val project: Project, private val compact: B
      * abgehakter Schritt mit Notiz geht als fehlgeschlagen an Claude, ohne Notiz als nicht gemacht. Vorher waren es ✓/✗
      * rechts - umständlich, und ✗ wirkte wie Löschen (2026-11-19).
      */
+    /** Dateien und Bilder ins Feld ziehen: als Pfad einfügen, wie im Eingabefeld des Session-Reiters. */
+    private fun dropFiles(field: javax.swing.text.JTextComponent) {
+        field.transferHandler = ImageDropHandler(field.transferHandler) { it }
+    }
+
+    /** Fokus und Cursor ins Feld, sobald es angezeigt wird (einmal). */
+    private fun focusWhenShown(field: JComponent) {
+        if (field.isShowing) { field.requestFocusInWindow(); return }
+        field.addHierarchyListener(object : java.awt.event.HierarchyListener {
+            override fun hierarchyChanged(e: java.awt.event.HierarchyEvent) {
+                if (e.changeFlags and java.awt.event.HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && field.isShowing) {
+                    field.removeHierarchyListener(this)
+                    com.intellij.openapi.wm.IdeFocusManager.getInstance(project).requestFocus(field, true)
+                }
+            }
+        })
+    }
+
     private fun checklistCard(p: Proposal): JPanel {
         val pending = p.isPending
         val ok = p.checks.count { it.result == 1 }; val bad = p.checks.count { it.result == 2 }
@@ -947,14 +968,17 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                     add(com.intellij.ui.InplaceButton(com.intellij.openapi.ui.popup.IconButton("Add a note to this step", HandoffIcons.note())) {
                         // Zuklappen nur ohne Text - sonst ginge die Notiz still verloren.
                         c.noteOpen = !c.noteOpen || c.note.isNotBlank(); c.focusNote = c.noteOpen; service.fireChanged()
-                    }.apply { border = JBUI.Borders.empty(2, 4) })
+                    }.apply { border = JBUI.Borders.empty(2, 4); cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR) })
                 }, BorderLayout.EAST)
             })
             if (pending && (c.noteOpen || c.note.isNotBlank())) {
                 val field = JBTextField(c.note).apply { emptyText.text = "Note on this step, e.g. what happened instead" }
                 field.document.addDocumentListener(object : DocumentAdapter() { override fun textChanged(e: DocumentEvent) { c.note = field.text } })
+                dropFiles(field)
                 body.add(Dictation.withMic(field).apply { alignmentX = LEFT_ALIGNMENT; border = JBUI.Borders.emptyLeft(JBUI.scale(28)) })
-                if (c.focusNote) { c.focusNote = false; SwingUtilities.invokeLater { field.requestFocusInWindow() } }
+                // Erst fokussieren, wenn das Feld wirklich angezeigt wird: Die Karte wird nach dem Klick neu aufgebaut, ein
+                // invokeLater landete im alten, schon verworfenen Feld (2026-11-26).
+                if (c.focusNote) { c.focusNote = false; focusWhenShown(field) }
             } else if (!pending && c.note.isNotBlank()) body.add(wrapped(c.note).apply { foreground = grey; border = JBUI.Borders.emptyLeft(JBUI.scale(28)) })
             body.add(Box.createVerticalStrut(JBUI.scale(4)))
         }
@@ -962,6 +986,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
         if (!pending) return card
         val note = JBTextField(p.noteDraft).apply { emptyText.text = "Note for Claude (optional)" }
         note.document.addDocumentListener(object : DocumentAdapter() { override fun textChanged(e: DocumentEvent) { p.noteDraft = note.text } })
+        dropFiles(note)
         val send = JButton("Send Results").apply {
             primary()
             toolTipText = "Unchecked steps go to Claude as failed if they have a note, otherwise as not done"
@@ -1352,6 +1377,7 @@ internal class HandoffPanel(private val project: Project, private val compact: B
                     override fun textChanged(e: DocumentEvent) { p.noteDraft = text }
                 })
             }
+            dropFiles(note)
             choose.isEnabled = p.selected != null
             choose.primary()
             choose.addActionListener { p.selected?.let { service.choose(p, it, note.text) } }

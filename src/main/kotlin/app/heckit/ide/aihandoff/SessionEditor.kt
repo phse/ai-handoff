@@ -195,6 +195,15 @@ object SessionEditors {
         return project.getServiceIfCreated(WaitingSessions::class.java)?.sessions.orEmpty().any { it.id == id && !it.finished }
     }
 
+    /** Zuletzt angezeigter Session-Reiter je Projekt. */
+    val lastSelected = java.util.concurrent.ConcurrentHashMap<Project, SessionFile>()
+
+    /** In den Eingabefeld des Reiters [file] eine `@`-Marke für [path] setzen und den Reiter nach vorn holen. */
+    fun insertMention(project: Project, file: SessionFile, path: String, label: String? = null) {
+        OpenFileDescriptor(project, file).navigate(true)
+        FileEditorManager.getInstance(project).getEditors(file).filterIsInstance<SessionEditor>().firstOrNull()?.insertMention(path, label)
+    }
+
     /** Offener Session-Reiter zu Terminal-Reiter oder Session, sonst null. */
     fun openTab(project: Project, tab: String?, sessionId: String?): SessionFile? =
         FileEditorManager.getInstance(project).openFiles.filterIsInstance<SessionFile>().firstOrNull { f ->
@@ -396,7 +405,7 @@ class NewSessionAction : com.intellij.openapi.actionSystem.AnAction(com.intellij
  * Bilder aus der Zwischenablage (Bildschirmfoto) werden vorher als PNG unter `~/.claude/handoff/images/` gespeichert.
  * Text geht wie gewohnt an den ursprünglichen Handler.
  */
-private class ImageDropHandler(private val delegate: javax.swing.TransferHandler, private val shorten: (String) -> String) : javax.swing.TransferHandler() {
+internal class ImageDropHandler(private val delegate: javax.swing.TransferHandler, private val shorten: (String) -> String) : javax.swing.TransferHandler() {
     private val files = java.awt.datatransfer.DataFlavor.javaFileListFlavor
     private val image = java.awt.datatransfer.DataFlavor.imageFlavor
 
@@ -1625,7 +1634,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             dictate.icon = HandoffIcons.mic(on = value)
             dictate.toolTipText = if (value) "Stop dictation" else "Dictate (macOS dictation)"
             if (value) hint.text = "Dictating - speak now. The microphone of macOS shows at the cursor; click here again or press Esc to stop."
-            else stateKey = null  // Hinweis beim nächsten Durchlauf neu setzen
+            else { stateKey = null; renderHint() }  // Hinweis neu setzen
             dictate.repaint()
         }
 
@@ -1739,6 +1748,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }
     }
 
+    /** Datei als `@`-Marke ins Eingabefeld (z. B. ein Datenbank-Ergebnis aus dem Kontextmenü), Fokus ins Feld. */
+    fun insertMention(path: String, label: String? = null) {
+        val token = mention(path).let { t -> label?.let { "$it $t" } ?: t }
+        insertCommand(token)
+    }
+
     private fun insertCommand(cmd: String) {
         val pos = input.caretPosition.coerceIn(0, input.document.length)
         val before = if (pos > 0 && !input.document.getText(pos - 1, 1).isBlank()) " " else ""
@@ -1815,7 +1830,18 @@ private class SessionEditor(private val project: Project, private val file: Sess
 
     /** Session läuft nicht im Terminal der IDE (z. B. nach einem Neustart): Knopf "Resume" statt "Send". */
     private var resumable = false
-    private val hint = JBLabel().apply { foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont() }
+    private val hint = JBLabel().apply {
+        foreground = UIUtil.getContextHelpForeground(); font = JBUI.Fonts.smallFont()
+        // Maus über der Meldung: stehen lassen; danach noch etwas Zeit zum Wegsehen.
+        addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseEntered(e: java.awt.event.MouseEvent) { if (noticeText != null) { hintHovered = true; renderHint() } }
+            override fun mouseExited(e: java.awt.event.MouseEvent) {
+                if (!hintHovered) return
+                hintHovered = false
+                noticeUntil = maxOf(noticeUntil, System.currentTimeMillis() + 2_000 + FADE_MS); renderHint()
+            }
+        })
+    }
 
     private val root = JPanel(BorderLayout()).apply {
         add(header, BorderLayout.NORTH)
@@ -1855,7 +1881,18 @@ private class SessionEditor(private val project: Project, private val file: Sess
         }, BorderLayout.EAST)
     }
 
-    private val timer = Timer(700) { refresh() }.apply { start() }
+    // Vor dem init-Block unten anlegen: Er ruft refresh() schon im Konstruktor auf, ein weiter unten deklariertes Feld war da
+    // noch null (NullPointerException in exited(), der Reiter ging nicht auf; 1.11.4, 2026-11-26).
+    private val seenRunning: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** Normaler Hinweis unter dem Feld (je nach Zustand), solange keine Meldung ihn überdeckt. */
+    private var baseHint = ""
+    private var hintHovered = false
+    private val fadeTimer = Timer(40) { renderHint() }
+    private var noticeText: String? = null
+    private var noticeUntil = 0L
+    private var noticeError = true
+    private var noticeWarn = false
+    private val timer = Timer(700) { refresh() }
 
     init {
         refresh()
@@ -1959,7 +1996,17 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // /model, /effort ohne Wert öffneten eine unsichtbare Auswahl im Terminal: stattdessen die Werteliste zeigen.
         if (SlashArguments.needsValue(shown) != null) { askValue(shown); return }
         if (resumeFromTab(shown)) return
-        val text = expanded(shown)
+        // Unsichtbare Zeichen (Unicode "Format": BOM, Zero-Width-Space/-Joiner, Word-Joiner, weiches Trennzeichen, LRM …) entfernt
+        // Claude Code (2.1.332) selbst und schluckt dann das Enter: "Removed 6 invisible characters · review and press Enter to
+        // send" - der Prompt blieb im Terminal stehen (2026-11-26, per PTY nachgestellt). Daher hier entfernen und es sagen.
+        val raw = expanded(shown)
+        // Endet der Prompt mit einem @pfad, öffnet Claude Code die Dateiauswahl und das Enter wählt dort, statt zu senden -
+        // der Prompt blieb im Terminal stehen (2026-11-26, Datensatz aus dem DB-Ergebnis; per PTY nachgestellt). Ein
+        // Leerzeichen dahinter schließt die Auswahl.
+        val cleaned = raw.filterNot { Character.getType(it) == Character.FORMAT.toInt() }
+        val removed = raw.length - cleaned.length
+        val text = if (Regex("""@\S+$""").containsMatchIn(cleaned)) "$cleaned " else cleaned
+        if (text.isBlank()) return
         endDictation()
         watchKeys = true
         SwingUtilities.invokeLater { logInputState("after send") }
@@ -1973,14 +2020,23 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // ein zweites Senden mit demselben Text im Terminal schickt trotzdem.
         // Hinweise wie "[⧉ In datei.md]" (offene Editor-Datei bzw. Auswahl, zeigt Claude Code in der Eingabezeile) sind kein
         // getippter Text und gehen nicht mit - sonst warnte das erste Enter nach jedem Wechsel der Editor-Datei (2026-11-18).
-        val typed = (if (tab != null && terminalOpen) SessionTerminals.typedInput(project, tab) else null)
+        var typed = (if (tab != null && terminalOpen) SessionTerminals.typedInput(project, tab) else null)
             ?.replace(EDITOR_HINTS, "")?.trim()?.takeIf { it.isNotEmpty() }
+        // Steht im Terminal genau der Prompt, den man schickt (Vorschlag von Claude Code, der als getippt erkannt wurde, oder
+        // dort schon getippt): Zeile leeren und senden statt warnen - er ginge sonst doppelt ab (2026-11-26, "/session-kuerzen").
+        if (typed != null && tab != null && (typed == shown || typed == text.trimEnd())) {
+            logger<SessionEditor>().info("Handoff: terminal input equals the prompt, clearing it before sending: ${typed.take(80)}")
+            SessionTerminals.keys(project, tab, "\u0015")
+            typed = null
+        }
         if (typed != null && typed != warnedTyped) {
             logger<SessionEditor>().info("Handoff: send held back, terminal input holds: ${typed.take(80)}")
             warnedTyped = typed
-            notice("The terminal input already holds \"${typed.take(60)}\" - it would be sent along. Clear it there (Ctrl+U) or send again.")
+            notice("The terminal input already holds \"${typed.take(60)}\". Send again to send both (\"${typed.take(20)} …\"), or clear it there (Ctrl+U).", warn = true)
             return
         }
+        // Zweites Senden trotz Text im Terminal: mit Leerzeichen anhängen - sonst klebte "foo" an "say hi" ("foosay hi").
+        val joinSpace = typed != null && !typed.last().isWhitespace()
         warnedTyped = null
         // Über den wartenden Stop-Hook kommt Text nur als Hinweis an, ein Slash-Befehl liefe dort nie - er blieb als
         // "Running…" stehen und sperrte das Feld (2026-11-22).
@@ -1989,11 +2045,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
             return
         }
         val ok = when {
-            tab != null && terminalOpen -> if (now) SessionTerminals.sendNow(project, tab, text) else SessionTerminals.send(project, tab, text)
+            tab != null && terminalOpen -> (if (joinSpace) " $text" else text).let { t -> if (now) SessionTerminals.sendNow(project, tab, t) else SessionTerminals.send(project, tab, t) }
             else -> sessionId?.let { sessions.reply(it, text) } == true
         }
         if (ok) {
-            noticeText = null
+            noticeText = null; renderHint()
+            if (removed > 0) notice("Removed $removed invisible character${if (removed > 1) "s" else ""} (BOM, zero-width …) - Claude Code would not send them.", warn = true)
             if (pending.isEmpty()) pendingBase = transcript?.entries?.count { it.kind == TranscriptEntry.Kind.USER } ?: 0
             if (!file.busy) startedIdle += text
             pending += text; if (now && tab != null && file.busy) sentNow += text; input.text = ""; attachments.clear(); renderTranscript(force = true)
@@ -2320,7 +2377,6 @@ private class SessionEditor(private val project: Project, private val file: Sess
     }
 
     /** Sessions, die in diesem Reiter schon liefen - nur dann heißt "keine Hook-Daten mehr", dass Claude beendet ist. */
-    private val seenRunning = mutableSetOf<String>()
     private fun exited(id: String?): Boolean {
         if (id == null) return false
         if (id in sessions.infos) { seenRunning += id; return false }
@@ -2350,7 +2406,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
         // ConcurrentHashMap: `null in set` wirft.
         val wasSent = id != null && id in sessions.sent
         val tasks = backgroundTasks().size
-        val key = listOf(id, shellOnly, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks).joinToString("|")
+        // Offene Karte zu einer Freigabe/Frage dieser Session: Sie ersetzt die Ja/Nein-Leiste unten (beides zugleich verwirrte).
+        val askCard = id != null && HandoffService.getInstance(project).proposals.any { it.isPending && it.askSession == id }
+        val key = listOf(id, shellOnly, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks, askCard).joinToString("|")
         if (key == stateKey) return
         stateKey = key
 
@@ -2397,7 +2455,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 // Frage von Claude Code (AskUserQuestion) im Terminal: meldet sich auch als permission_prompt, aber Ja/Nein passt nicht
                 // (Taste 1 hakte nur die erste Option an) - dann nur der Weg ins Terminal (2026-11-15).
                 val asking = transcript?.entries?.lastOrNull()?.let { it.kind == TranscriptEntry.Kind.TOOL && it.text.startsWith("AskUserQuestion") } == true
-                if (tab != null && terminal && waiting.notificationType == "permission_prompt" && !asking) {
+                if (tab != null && terminal && waiting.notificationType == "permission_prompt" && !asking && !askCard) {
                     // Worum es geht: der Werkzeugaufruf, auf den Claude Code wartet - sonst stand nur "needs your permission" da.
                     transcript?.lastTool?.let { t: String ->
                         question.add(JBScrollPane(javax.swing.JTextArea(t).apply {
@@ -2446,10 +2504,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
             else -> "Claude is not waiting for a prompt"
         }
         applyEmptyText()
-        val note = noticeText?.takeIf { System.currentTimeMillis() < noticeUntil }
-        hint.foreground = if (note != null && noticeError) JBColor.namedColor("Label.errorForeground", JBColor.RED) else UIUtil.getContextHelpForeground()
-        hint.text = when {
-            note != null -> note
+        baseHint = when {
             argHint != null -> argHint!!
             terminal -> "Enter sends, Ctrl+Enter sends right away while Claude works, Shift+Enter adds a line. Slash commands included."
             canSend -> "Enter sends, Shift+Enter adds a line. Session started outside Handoff: no slash commands."
@@ -2459,19 +2514,51 @@ private class SessionEditor(private val project: Project, private val file: Sess
             id == null && tab == null -> "Session not found."
             else -> "Send when Claude is done, or type in the terminal."
         }
+        renderHint()
     }
+
+
+    /**
+     * Meldung oder normaler Hinweis. Eine Meldung bleibt [NOTICE_MS] stehen, verblasst dann in [FADE_MS] zum normalen Hinweis;
+     * solange die Maus darüber steht, bleibt sie (2026-11-26: Warnungen sollen von selbst gehen, aber lesbar bleiben).
+     */
+    private fun renderHint() {
+        if (dictating) return
+        val now = System.currentTimeMillis()
+        val left = noticeUntil - now
+        val note = noticeText?.takeIf { hintHovered || left > 0 }
+        val strong = when {
+            note != null && noticeWarn -> WARN_COLOR
+            note != null && noticeError -> JBColor.namedColor("Label.errorForeground", JBColor.RED)
+            else -> null
+        }
+        val grey = UIUtil.getContextHelpForeground()
+        hint.foreground = if (strong != null && !hintHovered && left < FADE_MS) blend(strong, grey, left.toDouble() / FADE_MS) else strong ?: grey
+        // Warnungen gelb mit Symbol, Fehler rot mit Symbol - grau ging das unter (2026-11-26).
+        hint.icon = when {
+            note != null && noticeWarn -> com.intellij.icons.AllIcons.General.Warning
+            note != null && noticeError -> com.intellij.icons.AllIcons.General.Error
+            else -> null
+        }
+        hint.text = note ?: baseHint
+        if (note == null) { noticeText = null; fadeTimer.stop() }
+    }
+
+    private fun blend(a: java.awt.Color, b: java.awt.Color, t: Double): java.awt.Color {
+        val k = t.coerceIn(0.0, 1.0)
+        fun mix(x: Int, y: Int) = (y + (x - y) * k).toInt()
+        return java.awt.Color(mix(a.red, b.red), mix(a.green, b.green), mix(a.blue, b.blue))
+    }
+
+
 
     /**
      * One-off message (refused send, error) that stays for a while: updateState rewrites the hint on every refresh, so
      * a plain hint.text vanished after a few ms and nobody saw it (2026-11-23).
      */
-    private var noticeText: String? = null
-    private var noticeUntil = 0L
-    private var noticeError = true
-
-    private fun notice(text: String, error: Boolean = true) {
-        noticeText = text; noticeError = error; noticeUntil = System.currentTimeMillis() + 10_000
-        updateState(sessionId)
+    private fun notice(text: String, error: Boolean = true, warn: Boolean = false) {
+        noticeText = text; noticeError = error; noticeWarn = warn; noticeUntil = System.currentTimeMillis() + NOTICE_MS + FADE_MS
+        renderHint(); fadeTimer.start()
     }
 
     /** Text im Terminal-Eingabefeld, vor dem [send] schon gewarnt hat. */
@@ -2492,19 +2579,28 @@ private class SessionEditor(private val project: Project, private val file: Sess
     /** Nur, wenn Claude fertig ist und im eigenen Terminal läuft - dann steht der Vorschlag hinter "❯". */
     private fun updateSuggestion(id: String?) {
         val tab = file.tab
-        val done = sessions.waiting(id)?.finished == true && (id == null || id !in sessions.sent)
+        // Fertig heißt auch "Ready" ohne Wartezustand (z. B. nachdem eine Karte die Antwort brachte oder "Claude is done"
+        // weggeklickt wurde) - nur nicht, solange Claude arbeitet oder auf eine Freigabe wartet. Vorher fehlte der Vorschlag
+        // dann (2026-11-26, zweiter Vorschlag "Ask me to review it again").
+        val waiting = sessions.waiting(id)
+        val done = (waiting == null || waiting.finished) && sessions.workingOn(id) == null && (id == null || id !in sessions.sent)
         // Vorangestellte Dateien wie "[offene-datei.md]" (Claude Code hängt die offene Editor-Datei als Kontext an) weglassen -
         // sie passen selten zum nächsten Prompt.
         val s = (if (tab != null && done && terminalOpen) SessionTerminals.promptSuggestion(project, tab) else null)
             ?.replace(Regex("""^(?:\[[^\]\n]+]\s*)+"""), "")?.trim()?.takeIf { it.isNotEmpty() }
             // Ein Ergebnis, das Handoff selbst ins Terminal getippt hat, ist kein Vorschlag von Claude Code.
             ?.takeUnless { it.startsWith("Result of h") && it.contains("handed over earlier through Handoff") }
+            // Platzhalter einer frischen Session ("Try \"fix typecheck errors\"") ist kein Vorschlag.
+            ?.takeUnless { it.startsWith("Try \"") }
         if (s != suggestion) { suggestion = s; applyEmptyText() }
     }
 
     override fun getComponent(): JComponent = root
     override fun getPreferredFocusedComponent(): JComponent = input
     override fun getName() = "Claude Session"
+
+    /** Zuletzt angezeigter Session-Reiter des Projekts - Ziel von "Send to Claude Session <Titel>". */
+    override fun selectNotify() { SessionEditors.lastSelected[project] = file }
     override fun getFile(): VirtualFile = file
     override fun setState(state: FileEditorState) {}
     override fun isModified() = false
@@ -2512,7 +2608,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
     override fun addPropertyChangeListener(listener: PropertyChangeListener) {}
     override fun removePropertyChangeListener(listener: PropertyChangeListener) {}
     override fun dispose() {
-        timer.stop()
+        timer.stop(); fadeTimer.stop()
+        SessionEditors.lastSelected.remove(project, file)
         slash.hide()
         com.intellij.openapi.util.Disposer.dispose(cards)
         // Nach dem Schließen dieses Reiters (nicht beim Schließen des Projekts) die Liste ohne ihn neu schreiben.
@@ -2544,7 +2641,12 @@ private class SessionEditor(private val project: Project, private val file: Sess
         private val PARAGRAPH = Regex("<p>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
         private val INLINE_CODE = Regex("<code>([^<]{2,2000})</code>")
         private val TAG = Regex("<[^>]+>")
+        private const val NOTICE_MS = 8_000L
+        private const val FADE_MS = 800L
     }
+
+    // Der Timer startet erst hier, am Ende des Konstruktors: refresh() nutzt Felder, die weiter unten in der Klasse stehen.
+    init { timer.start() }
 }
 
 private val PASTED = Regex("""</?pasted_content id="[0-9a-f]{4}">\n?""")
@@ -2685,4 +2787,7 @@ internal fun urlDecode(text: String): String =
  * contain brackets itself - a SQL console is "console [live2023]" - so a hint ends at a "]" followed by a space or the
  * line end, not at the first "]" (the left-over "]" counted as typed text and swallowed the first Enter, 2026-11-23).
  */
+/** Gelb für Hinweise unter dem Eingabefeld, die eine Handlung brauchen (hell: dunkles Gelb, damit es lesbar bleibt). */
+private val WARN_COLOR = JBColor(0x9A6700, 0xE2B340)
+
 internal val EDITOR_HINTS = Regex("""^(?:\[[^\n]*?](?=\s|$)\s*)+""")
