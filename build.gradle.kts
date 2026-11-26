@@ -73,6 +73,11 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.12.1</h3>
+            <ul>
+              <li>A review request without a task no longer shows all local changes of the project (including those of other
+                  sessions); Claude is asked to start a task and move its files there first.</li>
+            </ul>
             <h3>1.12.0</h3>
             <ul>
               <li>Permission prompts ("Allow Bash …?") and questions from MCP servers (e.g. PhpStorm's "Allow Claude Code to

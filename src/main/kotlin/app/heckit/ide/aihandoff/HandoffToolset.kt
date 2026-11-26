@@ -254,7 +254,8 @@ class HandoffToolset : McpToolset {
         """
         |Asks the user to review the changes you made before you go on (or before you call the task done). The user reads
         |the diff in the IDE, can attach notes to individual lines and then approves or sends the notes back.
-        |Reviews the changelist of the current or last task (handoff_begin_task), otherwise all local changes.
+        |Reviews the changelist of the current or last task (handoff_begin_task). Without a task it refuses, so the user
+        |never gets all local changes of the project: start the task, move your files into it, then ask again.
         |Returns an id; call handoff_wait_for_result with it to get the approval or the notes (path:line and text).
         """
     )
@@ -265,7 +266,13 @@ class HandoffToolset : McpToolset {
         val project = currentCoroutineContext().project
         val session = runCatching { Callers.session("handoff_request_review", summary.trim()) }.getOrNull()
         val tasks = TaskChangelists.getInstance(project)
-        val p = HandoffService.getInstance(project).proposeReview(summary.trim(), tasks.prepareReview(session), tasks.otherTaskLists(session))
+        // Ohne Aufgabe zeigte die Karte alle lokalen Änderungen des Projekts (auch fremde) - lieber ablehnen.
+        val list = tasks.prepareReview(session)
+            ?: return "No review requested: there is no task for your changes, so the user would see all local changes " +
+                "of the project. Call handoff_begin_task (short title), move the files you changed into its changelist with " +
+                "move_changes_to_changelist, then call handoff_request_review again. Next time call handoff_begin_task " +
+                "before your first edit."
+        val p = HandoffService.getInstance(project).proposeReview(summary.trim(), list, tasks.otherTaskLists(session))
         ApplicationManager.getApplication().invokeLater({
             SessionEditors.revealCards(project, p)
         }, project.disposed)
