@@ -44,7 +44,8 @@ of the chat, running it somewhere and pasting the output back, Claude proposes i
   tab in the background and shows the session in an editor tab: the conversation formatted, a prompt field that sends to the
   terminal as typed (slash commands with suggestions included), buttons for permission questions, a spinner while Claude
   works, clickable links (files, folders, web pages, settings, IDE actions), images by drag and drop or paste with marked
-  areas, Handoff cards and plan limits in the tab, and **Resume** after a restart. `/show-in-editor` opens a running
+  areas, Handoff cards and plan limits (as colored bars) in the tab, a **Files** sidebar with every file of the session as
+  a card with a preview (filter by origin and type, jump to the mention, open), and **Resume** after a restart. `/show-in-editor` opens a running
   session there, and **Open in Handoff** in the terminal's context menu shows the session running in that tab. **↶** next to
   a prompt rewinds to before it: code, conversation or both (`claude --resume … --rewind-files` / `--resume-session-at`).
   Pasted file paths become short tokens like dropped files. **Copy** above code blocks and below messages; the globe runs

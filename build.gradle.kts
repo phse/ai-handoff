@@ -73,6 +73,15 @@ intellijPlatform {
             untilBuild = provider { null }
         }
         changeNotes = """
+            <h3>1.13.0</h3>
+            <ul>
+              <li><b>Files</b> in the session tab (also for opened .jsonl logs): a sidebar with every file of the session as a
+                  card with a preview - written, edited or linked by Claude, attached by you (@, pasted images, paths in the
+                  prompt). Filter by All / Claude / You and by type (Images, Text &amp; code, Other), temp files on demand.
+                  A click jumps to the mention in the conversation and highlights it, the corner arrow opens the file.</li>
+              <li>Plan limits and context as colored bars (green, yellow from 60 %, red from 85 %) with the time left until
+                  the reset - in the session header tooltip and in the Usage tab.</li>
+            </ul>
             <h3>1.12.1</h3>
             <ul>
               <li>A review request without a task no longer shows all local changes of the project (including those of other

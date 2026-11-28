@@ -36,7 +36,17 @@ object ScreenshotMaker {
     fun start(project: Project, dir: String) {
         val out = File(dir).apply { mkdirs() }
         Thread({
-            try { run(project, out) } catch (e: Throwable) { log.error("Screenshots failed", e) }
+            // Erfundene Plan-Limits statt der echten (verraten sonst den Wochen-Reset); die echte Datei danach zurück.
+            val data = app.heckit.ide.aihandoff.PlanLimits.data
+            val backup = if (data.isFile) data.readBytes() else null
+            try {
+                val now = System.currentTimeMillis() / 1000
+                data.parentFile.mkdirs()
+                data.writeText("""{"rate_limits":{"five_hour":{"used_percentage":38,"resets_at":${now + 2 * 3600 + 600}},""" +
+                    """"seven_day":{"used_percentage":71,"resets_at":${now + 3 * 86400 + 5 * 3600}}}}""")
+                run(project, out)
+            } catch (e: Throwable) { log.error("Screenshots failed", e) }
+            finally { if (backup != null) data.writeBytes(backup) }
         }, "Handoff screenshots").start()
     }
 
@@ -305,7 +315,7 @@ object ScreenshotMaker {
             // Den Fehlschlag aufklappen: ein Werkzeugschritt mit Ein- und Ausgabe.
             com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).selectedEditor?.component?.let { root ->
                 com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
-                    .filter { it.text.orEmpty().contains("Week") }.forEach { it.text = "5h 12 %  ·  Week 34 %" }
+                    .filter { it.text.orEmpty().contains("Week") }.forEach { it.text = "5h 38 %  ·  Week 71 %"; it.foreground = app.heckit.ide.aihandoff.UsageBars.color(71.0) }
             }
         }
         Thread.sleep(800)
@@ -328,12 +338,13 @@ object ScreenshotMaker {
         fun text(t: String) = """{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":${str(t)}}]}}"""
         fun tool(name: String, key: String, value: String) = """{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"$name","input":{"$key":${str(value)}}}]}}"""
         transcript.writeText(listOf(
-            user("Add a free shipping threshold to the cart total"),
+            user("Add a free shipping threshold to the cart total, button style as in ${base.path}/design/c-square.png"),
             tool("Read", "file_path", "${base.path}/src/cart.js"),
             tool("Edit", "file_path", "${base.path}/src/cart.js"),
             tool("Bash", "command", "npm test"),
             text("Done. Orders from **50 €** now ship for free:\n\n- `src/cart.js:3` holds the threshold `FREE_SHIPPING_FROM`\n" +
-                "- the shipping fee is added only below it\n- all 24 tests pass\n\nThe docs for the rule: https://example.com/docs/shipping\n\n" +
+                "- the shipping fee is added only below it\n- all 24 tests pass\n\nThe docs for the rule: https://example.com/docs/shipping\n" +
+                "Badge as in [b-pill.png](design/b-pill.png), noted in [checkout-design.md](docs/checkout-design.md).\n\n" +
                 "The context is getting long; before the next step:\n\n/compact Keep only the shipping rule and the open question"),
             user("Should the threshold apply before or after the discount?"),
             tool("mcp__phpstorm__handoff_ask", "title", "Free shipping and discounts"),
@@ -361,6 +372,12 @@ object ScreenshotMaker {
             ToolWindowManager.getInstance(project).getToolWindow("Project")?.hide()
             // Nur der Session-Reiter (die Sandbox öffnet z. B. "What's New").
             com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).let { m -> m.openFiles.forEach(m::closeFile) }
+            // Files-Seitenleiste offen (1.13.0), Filter wie nach der Installation.
+            com.intellij.ide.util.PropertiesComponent.getInstance().apply {
+                setValue("handoff.files.open", true, false); setValue("handoff.files.showTemp", false, false)
+                setValue("handoff.files.filter", "ALL"); setValue("handoff.files.kind", "ANY")
+                setValue("handoff.files.split", "0.66")
+            }
             com.intellij.openapi.fileEditor.OpenFileDescriptor(project, app.heckit.ide.aihandoff.SessionFile(null, id, transcript.path, "Free shipping threshold")).navigate(true)
         }
         Thread.sleep(4000)
@@ -368,7 +385,7 @@ object ScreenshotMaker {
         edt {
             com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).selectedEditor?.component?.let { root ->
                 com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.JBLabel::class.java)
-                    .filter { it.text.orEmpty().contains("Week") }.forEach { it.text = "5h 12 %  ·  Week 34 %" }
+                    .filter { it.text.orEmpty().contains("Week") }.forEach { it.text = "5h 38 %  ·  Week 71 %"; it.foreground = app.heckit.ide.aihandoff.UsageBars.color(71.0) }
                 // Wie eine Session aus "New Claude Session" (in der Sandbox läuft keine): ohne Resume, Hinweis fürs Terminal.
                 com.intellij.util.ui.UIUtil.findComponentsOfType(root, com.intellij.ui.components.ActionLink::class.java)
                     .filter { it.text.orEmpty().startsWith("Resume") }.forEach { it.isVisible = false }
@@ -386,6 +403,7 @@ object ScreenshotMaker {
         Thread.sleep(500)
         shot(frame, File(out, "02-session.png"))
         edt {
+            com.intellij.ide.util.PropertiesComponent.getInstance().setValue("handoff.files.open", false, false)
             app.heckit.ide.aihandoff.SessionEditors.closeAll(project)
             service.proposals.clear(); service.fireChanged()
             tw.show()

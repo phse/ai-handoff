@@ -132,9 +132,13 @@ class UsagePanel(private val project: Project) : JPanel(BorderLayout()), Disposa
 
     private fun limitRow(name: String, w: PlanLimits.Window, fmt: DateTimeFormatter) = JPanel(BorderLayout(JBUI.scale(8), JBUI.scale(2))).apply {
         alignmentX = LEFT_ALIGNMENT; border = JBUI.Borders.emptyBottom(6)
-        val reset = w.resetsAt?.atZone(zone)?.format(fmt)?.let { " · resets $it" }.orEmpty()
-        add(JBLabel("<html><b>$name</b>  ${w.usedPercent.toInt()} %$reset</html>"), BorderLayout.NORTH)
-        add(javax.swing.JProgressBar(0, 100).apply { value = w.usedPercent.toInt().coerceIn(0, 100) }, BorderLayout.CENTER)
+        val reset = w.resetsAt?.let { " · resets ${it.atZone(zone).format(fmt)} (${UsageBars.until(it)})" }.orEmpty()
+        val color = UsageBars.color(w.usedPercent)
+        add(JBLabel("<html><b>$name</b>  <b><font color=\"${com.intellij.ui.ColorUtil.toHtmlColor(color)}\">${w.usedPercent.toInt()} %</font></b>" +
+            "<font color=\"${com.intellij.ui.ColorUtil.toHtmlColor(UIUtil.getContextHelpForeground())}\">$reset</font></html>"), BorderLayout.NORTH)
+        // Farbe nach Verbrauch (grün, gelb ab 60 %, rot ab 85 %).
+        // Eigener Balken: JProgressBar der IDE ignoriert foreground (DarculaProgressBarUI nimmt die Theme-Farbe).
+        add(UsageBars.Bar(w.usedPercent), BorderLayout.CENTER)
         maximumSize = java.awt.Dimension(Int.MAX_VALUE, preferredSize.height)
     }
 

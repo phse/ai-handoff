@@ -1005,6 +1005,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
      * Konstruktor zeichnet den Verlauf schon (weiter unten deklariert war das Feld dann noch null, Sandbox 2026-11-21).
      */
     private val copyTexts = HashMap<String, String>()
+    /**
+     * Dateien der Session nur neu suchen, wenn neue Einträge da sind (prüft jeden Pfad im Dateisystem). Hier oben: Der
+     * Konstruktor ruft updateState schon auf - weiter unten deklariert war das Feld null (NPE, Reiter ging nicht auf, 2026-11-27).
+     */
+    private var attachedCache: Pair<Int, List<Attachments.Item>> = -1 to emptyList()
     /** Zahl der Prompts im Protokoll, als der älteste vorgemerkte abgeschickt wurde. */
     private var pendingBase = 0
     /** Davon per Ctrl+Enter sofort gesendet. */
@@ -1258,12 +1263,14 @@ private class SessionEditor(private val project: Project, private val file: Sess
      */
     private fun updateHeaderTip() {
         val lines = mutableListOf<String>()
-        status.text?.takeIf { it.isNotBlank() }?.let { lines += it }
-        currentDir()?.let { lines += it }
-        lines += limitTips
+        status.text?.takeIf { it.isNotBlank() }?.let { lines += "<b>${StringUtil.escapeXmlEntities(it)}</b>" }
+        currentDir()?.let { lines += StringUtil.escapeXmlEntities(it) }
         // <nobr>: Der Tooltip der IDE bricht HTML sonst schon bei rund 250 px um - Pfad und Rücksetzzeit rissen mitten
         // durch ("Do. 00:" / "20", 2026-11-18).
-        val tip = lines.joinToString("<br>") { "<nobr>${StringUtil.escapeXmlEntities(it)}</nobr>" }.takeIf { it.isNotEmpty() }?.let { "<html>$it</html>" }
+        val head = lines.joinToString("<br>") { "<nobr>$it</nobr>" }
+        // Modell, Kontext und Limits als Tabelle: Name | Balken in der Farbe des Verbrauchs | Prozent und Rücksetzzeit.
+        val rows = limitTips.takeIf { it.isNotEmpty() }?.joinToString("", "<table cellspacing=\"0\" cellpadding=\"2\">", "</table>")
+        val tip = listOfNotNull(head.takeIf { it.isNotEmpty() }, rows).takeIf { it.isNotEmpty() }?.joinToString("<br>", "<html>", "</html>")
         if (status.toolTipText != tip) status.toolTipText = tip
         if (limits.toolTipText != tip) limits.toolTipText = tip
         val dirTip = tip?.replace("</html>", "<br><br>Click to reveal the folder</html>")
@@ -1295,30 +1302,38 @@ private class SessionEditor(private val project: Project, private val file: Sess
             val model = str("model", "display_name")
             val effort = str("effort", "level")
             model?.let { parts += it }
-            listOfNotNull(model?.let { "Model: $it" }, effort?.let { "effort $it" }).takeIf { it.isNotEmpty() }?.let { tips += it.joinToString(", ") }
-            str("context_window", "used_percentage")?.toIntOrNull()?.let { pct ->
-                parts += "Context $pct %"
+            model?.let { m -> tips += row("Model", "", StringUtil.escapeXmlEntities(m + (effort?.let { ", effort $it" } ?: ""))) }
+            str("context_window", "used_percentage")?.toDoubleOrNull()?.let { pct ->
+                parts += "Context ${pct.toInt()} %"
                 val used = str("context_window", "total_input_tokens")?.toLongOrNull()
                 val size = str("context_window", "context_window_size")?.toLongOrNull()
                 fun k(n: Long) = if (n >= 1_000_000 && n % 1_000_000 == 0L) "${n / 1_000_000}M" else "${(n + 500) / 1000}k"
-                tips += "Context: $pct % used" + (if (used != null && size != null) " (${k(used)} of ${k(size)} tokens)" else "")
+                tips += row("Context", UsageBars.html(pct), pct(pct) + (if (used != null && size != null) " · ${k(used)} of ${k(size)} tokens" else ""))
             }
         }
         val fmt = java.time.format.DateTimeFormatter.ofPattern("EEE HH:mm").withZone(java.time.ZoneId.systemDefault())
         // Tooltip: je Limit eine Zeile mit Verbrauch und Rücksetzzeit statt zwei getrennter Zeilen.
         fun limit(label: String, short: String, w: PlanLimits.Window) {
             parts += "$short ${w.usedPercent.toInt()} %"
-            tips += "$label: ${w.usedPercent.toInt()} % used" + (w.resetsAt?.let { ", resets ${fmt.format(it)}" } ?: "")
+            tips += row(label, UsageBars.html(w.usedPercent), pct(w.usedPercent) +
+                (w.resetsAt?.let { " · resets ${fmt.format(it)} (${UsageBars.until(it)})" } ?: ""))
         }
-        l?.fiveHour?.let { limit("5-hour limit", "5h", it) }
-        l?.sevenDay?.let { limit("Weekly limit", "Week", it) }
+        l?.fiveHour?.let { limit("5-hour", "5h", it) }
+        l?.sevenDay?.let { limit("Weekly", "Week", it) }
         limits.text = parts.joinToString("  ·  ")
         limitTips = tips
         updateHeaderTip()
         // Fast aufgebraucht: auffällig.
         val max = listOfNotNull(l?.fiveHour?.usedPercent, l?.sevenDay?.usedPercent).maxOrNull() ?: 0.0
-        limits.foreground = if (max >= 90) JBColor(0xB04079, 0xC86A9A) else UIUtil.getContextHelpForeground()
+        limits.foreground = if (max >= 60) UsageBars.color(max) else UIUtil.getContextHelpForeground()
     }
+
+    /** Zeile im Tooltip der Kopfzeile (schon HTML): Name | Balken | Text. */
+    private fun row(name: String, bar: String, text: String) =
+        "<tr><td><nobr>$name</nobr></td><td valign=\"middle\">$bar</td><td><nobr>$text</nobr></td></tr>"
+
+    /** Prozent fett in der Farbe des Verbrauchs. */
+    private fun pct(p: Double) = "<b><font color=\"${com.intellij.ui.ColorUtil.toHtmlColor(UsageBars.color(p))}\">${p.toInt()} %</font></b>"
 
     /** Rückfrage (Freigabe) mit Knöpfen; nur sichtbar, wenn Claude auf eine Eingabe wartet. */
     private val question = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false }
@@ -1843,9 +1858,16 @@ private class SessionEditor(private val project: Project, private val file: Sess
         })
     }
 
+    private var filesOpen = com.intellij.ide.util.PropertiesComponent.getInstance().getBoolean(FILES_KEY, false)
+    private val filesPanel = FilesPanel(project, { baseDir() }, { i, name -> jumpTo(i, name) }, { if (filesOpen) toggleFiles() })
+    /** Verlauf links, Dateiliste rechts (ein-/ausblendbar, Breite gemerkt). */
+    private val filesHost = com.intellij.ui.OnePixelSplitter(false, "handoff.files.split", 0.72f).apply {
+        firstComponent = JPanel(BorderLayout()).apply { add(search, BorderLayout.NORTH); add(scroll, BorderLayout.CENTER) }
+        secondComponent = if (filesOpen) filesPanel else null
+    }
     private val root = JPanel(BorderLayout()).apply {
         add(header, BorderLayout.NORTH)
-        add(JPanel(BorderLayout()).apply { add(search, BorderLayout.NORTH); add(scroll, BorderLayout.CENTER) }, BorderLayout.CENTER)
+        add(filesHost, BorderLayout.CENTER)
         if (file.logOnly) add(logBar(), BorderLayout.SOUTH) else add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             border = JBUI.Borders.compound(JBUI.Borders.customLineTop(JBColor.border()), JBUI.Borders.empty(8, 12))
             add(question, BorderLayout.NORTH)
@@ -2165,7 +2187,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val canOpen = e.detail != null || e.output != null
         val label = StringUtil.escapeXmlEntities(e.text)
         val text = if (canOpen) "<a href=\"$TOOL_LINK$key\">$label</a>" else label
-        html.append("<div class=\"tool\">")
+        html.append("<div class=\"tool\"><a name=\"e$key\"></a>")
         if (err == null) html.append(if (open) "▾ " else "⚙ ").append(text)
         else html.append("<span class=\"error\">✗ </span>").append(text).append("<span class=\"error\"> — ").append(StringUtil.escapeXmlEntities(err)).append("</span>")
         html.append("</div>")
@@ -2305,7 +2327,9 @@ private class SessionEditor(private val project: Project, private val file: Sess
                 if (count >= 2) {
                     val key = offset + i
                     val open = key in expanded
-                    html.append("<div class=\"tool\"><a href=\"$STEPS_LINK$key\">${if (open) "▾" else "▸"} $count steps</a>")
+                    html.append("<div class=\"tool\">")
+                    if (!open) for (k in i..end) html.append("<a name=\"e${offset + k}\"></a>")
+                    html.append("<a href=\"$STEPS_LINK$key\">${if (open) "▾" else "▸"} $count steps</a>")
                     val failed = (i..end).count { shown[it].error != null }
                     if (failed > 0) html.append(" · <span class=\"error\">$failed failed</span>")
                     if (!open) html.append(" · ").append(StringUtil.escapeXmlEntities(StringUtil.shortenTextWithEllipsis(shown[end].text, 120, 0)))
@@ -2327,7 +2351,11 @@ private class SessionEditor(private val project: Project, private val file: Sess
             i++
             // One faulty entry must not stop the whole transcript (2026-11-23: a "%" did).
             val mark = html.length
-            try { appendEntry(html, e, offset + i - 1) } catch (ex: Exception) {
+            try {
+                appendEntry(html, e, offset + i - 1)
+                // Sprungmarke für die Dateiliste: in das erste Element des Eintrags (ein leeres <a> davor machte eine Leerzeile).
+                if (html.length > mark) anchorAt(html, mark)?.let { html.insert(it, "<a name=\"e${offset + i - 1}\"></a>") }
+            } catch (ex: Exception) {
                 if (ex is com.intellij.openapi.progress.ProcessCanceledException) throw ex
                 logger<SessionEditor>().warn("Handoff: entry failed to render", ex)
                 html.setLength(mark)
@@ -2369,6 +2397,198 @@ private class SessionEditor(private val project: Project, private val file: Sess
         SwingUtilities.invokeLater { SwingUtilities.invokeLater { lastHeight = bar.maximum; renderingNow = false } }
     }
 
+    private fun attachments(): List<Attachments.Item> {
+        val t = transcript ?: return emptyList()
+        val entries = synchronized(t) { t.entries.toList() }
+        if (attachedCache.first != entries.size) {
+            attachedCache = entries.size to Attachments.collect(entries, baseDir()?.trimEnd('/'))
+            filesPanel.update(attachedCache.second)
+        }
+        return attachedCache.second
+    }
+
+    private fun toggleFiles() {
+        filesOpen = !filesOpen
+        com.intellij.ide.util.PropertiesComponent.getInstance().setValue(FILES_KEY, filesOpen, false)
+        filesHost.secondComponent = if (filesOpen) filesPanel else null
+        stateKey = null
+        updateState(sessionId)
+    }
+
+    /**
+     * Stelle für die Sprungmarke: direkt vor dem ersten Text des Eintrags. Eine Marke gleich nach `<div class="user">`
+     * erzeugte eine leere Zeile oben in der Sprechblase (implizierter Absatz vor der Tabelle, 2026-11-27).
+     */
+    private fun anchorAt(html: StringBuilder, from: Int): Int? {
+        var k = html.indexOf(">", from)
+        while (k in 0 until html.length - 1) {
+            val open = html.lastIndexOf("<", k)
+            val tag = html.substring(open, k + 1)
+            if (html[k + 1] != '<' && !tag.startsWith("<a ") && !tag.startsWith("</")) return k + 1
+            k = html.indexOf(">", k + 1)
+        }
+        // Ohne Text (Bild): gleich nach dem ersten Tag - dort ist es ein inline-Inhalt (div.tool mit Bild-Link).
+        return html.indexOf(">", from).takeIf { it >= 0 }?.plus(1)
+    }
+
+    /** Zum Eintrag [index] im Verlauf scrollen; liegt er vor den gezeigten Einträgen, mehr zeigen, Schritt-Gruppen aufklappen. */
+    private fun jumpTo(index: Int, needle: String? = null) {
+        val t = transcript ?: return
+        val entries = synchronized(t) { t.entries.toList() }
+        val need = entries.size - index
+        if (need > limit) limit = need
+        if (entries.getOrNull(index)?.kind == TranscriptEntry.Kind.TOOL) {
+            val from = entries.size - limit
+            var start = index
+            while (start - 1 >= maxOf(0, from) && entries[start - 1].kind == TranscriptEntry.Kind.TOOL) start--
+            expanded += start
+        }
+        renderTranscript(force = false)
+        SwingUtilities.invokeLater { SwingUtilities.invokeLater { pane.scrollToReference("e$index"); flash("e$index", needle) } }
+    }
+
+    /**
+     * Eintrag mit der Sprungmarke [name] kurz umrahmen, der Hintergrund flackert einmal auf und blendet aus; der Dateiname
+     * [needle] darin bekommt zusätzlich einen kräftigeren Hintergrund (2026-11-27: statt markiertem Text).
+     */
+    private val flashTags = mutableListOf<Any>()
+    private var flashStart = 0L
+    /** 0..1: schnell einblenden, kurz halten, langsam ausblenden. */
+    private fun flashAlpha(): Float {
+        val t = (System.currentTimeMillis() - flashStart).toFloat()
+        return when { t < 150 -> t / 150; t < 900 -> 1f; t < 2000 -> 1f - (t - 900) / 1100; else -> 0f }.coerceIn(0f, 1f)
+    }
+    private fun clearFlash() { flashTags.forEach { runCatching { pane.highlighter.removeHighlight(it) } }; flashTags.clear() }
+    private val flashTimer = Timer(30) { e ->
+        if (System.currentTimeMillis() - flashStart > 2000) { clearFlash(); (e.source as Timer).stop() }
+        pane.repaint()
+    }
+
+    /** Rahmen um den ganzen Eintrag, volle Breite, runde Ecken. */
+    private inner class BlockPainter(private val bubble: Boolean) : javax.swing.text.Highlighter.HighlightPainter {
+        override fun paint(g: java.awt.Graphics, p0: Int, p1: Int, bounds: java.awt.Shape, c: javax.swing.text.JTextComponent) {
+            val a = flashAlpha().takeIf { it > 0 } ?: return
+            // Sprechblase: deren echte Umrisse aus dem View-Baum (der Innenabstand oben ist größer als geschätzt, der Rahmen
+            // lag oben hinter der Blase - sah nach mehr Abstand oben aus, 2026-11-27).
+            val box = if (bubble) bubbleBounds(c, p0, p1) else null
+            val y = box?.let { (it.y - JBUI.scale(1)) to (it.y + it.height + JBUI.scale(1)) } ?: blockSpan(c, p0, p1) ?: return
+            // Sprechblase (Prompt): Rahmen um die ganze Blase samt Innenabstand.
+            // Sprechblase: knapp außerhalb ihres Innenabstands (6 px) - oben ist Platz (margin-top 14), unten nur 3 px bis
+            // zur nächsten Zeile. Sonst wenig Luft, damit der Rahmen nicht über die Nachbarzeilen läuft (2026-11-27).
+            val padTop = JBUI.scale(3); val padBottom = JBUI.scale(3)
+            val x = JBUI.scale(14); val w = c.width - 2 * x
+            val top = y.first - padTop; val h = y.second - y.first + padTop + padBottom
+            val g2 = g.create() as java.awt.Graphics2D
+            try {
+                g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+                val focus = JBUI.CurrentTheme.Focus.focusColor()
+                val arc = JBUI.scale(10)
+                g2.color = com.intellij.ui.ColorUtil.withAlpha(focus, 0.16 * a)
+                g2.fillRoundRect(x, top, w, h, arc, arc)
+                g2.color = com.intellij.ui.ColorUtil.withAlpha(focus, 0.9 * a)
+                g2.stroke = java.awt.BasicStroke(JBUI.scale(2).toFloat())
+                g2.drawRoundRect(x, top, w, h, arc, arc)
+            } finally { g2.dispose() }
+        }
+    }
+
+    /**
+     * Oberkante und Unterkante aller sichtbaren Zeichen in [p0, p1). Nicht nur erstes/letztes Zeichen: In der Sprechblase
+     * steht die Uhrzeit als letzte Zelle oben rechts - der Rahmen endete mitten im Prompt (2026-11-27).
+     */
+    private fun blockSpan(c: javax.swing.text.JTextComponent, p0: Int, p1: Int): Pair<Int, Int>? {
+        val text = runCatching { c.document.getText(p0, p1 - p0) }.getOrDefault("")
+        var top = Int.MAX_VALUE; var bottom = Int.MIN_VALUE
+        val step = maxOf(1, text.length / 400)
+        var i = 0
+        while (i < text.length) {
+            if (!text[i].isWhitespace()) runCatching { c.modelToView2D(p0 + i) }.getOrNull()?.let { r ->
+                top = minOf(top, r.y.toInt()); bottom = maxOf(bottom, (r.y + r.height).toInt())
+            }
+            i += step
+        }
+        text.indexOfLast { !it.isWhitespace() }.takeIf { it >= 0 }?.let { j -> runCatching { c.modelToView2D(p0 + j) }.getOrNull()?.let { r -> bottom = maxOf(bottom, (r.y + r.height).toInt()) } }
+        return if (top == Int.MAX_VALUE) null else top to bottom
+    }
+
+    /** Umriss des `div.user` (Sprechblase), in dem der Eintrag steht, über die Views des Dokuments. */
+    private fun bubbleBounds(c: javax.swing.text.JTextComponent, p0: Int, p1: Int): java.awt.Rectangle? {
+        val doc = c.document as? javax.swing.text.html.HTMLDocument ?: return null
+        val text = runCatching { doc.getText(p0, p1 - p0) }.getOrDefault("")
+        val pos = p0 + (text.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: return null)
+        var el: javax.swing.text.Element? = doc.getCharacterElement(pos)
+        // CLASS nur am Element selbst (isDefined): getAttribute erbt sie von den Eltern - sonst endete die Suche beim Text.
+        while (el != null && !(el.name == "div" && el.attributes.isDefined(javax.swing.text.html.HTML.Attribute.CLASS) &&
+                el.attributes.getAttribute(javax.swing.text.html.HTML.Attribute.CLASS) == "user")) el = el.parentElement
+        val target = el ?: return null
+        fun find(v: javax.swing.text.View, a: java.awt.Shape): java.awt.Rectangle? {
+            if (v.element === target) {
+                // Die Allokation eines Blocks enthält seine CSS-Ränder (margin) - die gehören nicht zur Blase.
+                fun m(k: javax.swing.text.html.CSS.Attribute) = v.attributes.getAttribute(k)?.toString()?.let { Regex("[0-9.]+").find(it)?.value?.toFloatOrNull() }?.toInt() ?: 0
+                val r = a.bounds
+                val top = m(javax.swing.text.html.CSS.Attribute.MARGIN_TOP); val bottom = m(javax.swing.text.html.CSS.Attribute.MARGIN_BOTTOM)
+                return java.awt.Rectangle(r.x, r.y + top, r.width, r.height - top - bottom)
+            }
+            for (i in 0 until v.viewCount) {
+                val child = v.getView(i)
+                if (child.startOffset > target.startOffset || child.endOffset < target.endOffset) continue
+                val ca = v.getChildAllocation(i, a) ?: continue
+                find(child, ca)?.let { return it }
+            }
+            return null
+        }
+        val root = c.ui.getRootView(c)
+        val ins = c.insets
+        return find(root, java.awt.Rectangle(ins.left, ins.top, c.width - ins.left - ins.right, c.height - ins.top - ins.bottom))
+    }
+
+    /** Kräftigerer Hintergrund hinter dem Dateinamen. */
+    private inner class WordPainter : javax.swing.text.LayeredHighlighter.LayerPainter() {
+        override fun paint(g: java.awt.Graphics, p0: Int, p1: Int, bounds: java.awt.Shape, c: javax.swing.text.JTextComponent) {}
+        override fun paintLayer(g: java.awt.Graphics, p0: Int, p1: Int, bounds: java.awt.Shape, c: javax.swing.text.JTextComponent, view: javax.swing.text.View): java.awt.Shape? {
+            val a = flashAlpha().takeIf { it > 0 } ?: return null
+            val r = runCatching { view.modelToView(p0, javax.swing.text.Position.Bias.Forward, p1, javax.swing.text.Position.Bias.Backward, bounds).bounds }.getOrNull() ?: return null
+            val g2 = g.create() as java.awt.Graphics2D
+            try {
+                g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = com.intellij.ui.ColorUtil.withAlpha(JBUI.CurrentTheme.Focus.focusColor(), 0.45 * a)
+                g2.fillRoundRect(r.x - JBUI.scale(2), r.y, r.width + JBUI.scale(4), r.height, JBUI.scale(4), JBUI.scale(4))
+            } finally { g2.dispose() }
+            return r
+        }
+    }
+
+    private fun flash(name: String, needle: String? = null) {
+        val doc = pane.document as? javax.swing.text.html.HTMLDocument ?: return
+        val marks = mutableListOf<Pair<String, Int>>()
+        val it = doc.getIterator(javax.swing.text.html.HTML.Tag.A)
+        while (it.isValid) {
+            (it.attributes?.getAttribute(javax.swing.text.html.HTML.Attribute.NAME) as? String)?.let { n -> marks += n to it.startOffset }
+            it.next()
+        }
+        val start = marks.firstOrNull { it.first == name }?.second ?: return
+        val end = marks.map { it.second }.filter { it > start }.minOrNull() ?: minOf(doc.length, start + 2000)
+        clearFlash()
+        runCatching { pane.highlighter.addHighlight(start, end, BlockPainter(transcript?.entries?.getOrNull(name.removePrefix("e").toIntOrNull() ?: -1)?.kind == TranscriptEntry.Kind.USER)) }.getOrNull()?.let { flashTags += it }
+        if (!needle.isNullOrEmpty()) {
+            val text = runCatching { doc.getText(start, end - start) }.getOrDefault("")
+            var i = text.indexOf(needle)
+            while (i >= 0) {
+                runCatching { pane.highlighter.addHighlight(start + i, start + i + needle.length, WordPainter()) }.getOrNull()?.let { flashTags += it }
+                i = text.indexOf(needle, i + needle.length)
+            }
+        }
+        // Nicht an die Oberkante (dort wurde der Rahmen abgeschnitten), sondern mit Abstand, bei kurzen Einträgen ins obere Drittel.
+        blockSpan(pane, start, end)?.let { (top, bottom) ->
+            val view = scroll.viewport.extentSize.height
+            val margin = JBUI.scale(24)
+            val y = if (bottom - top + 2 * margin < view) top - maxOf(margin, (view - (bottom - top)) / 3) else top - margin
+            scroll.verticalScrollBar.value = y.coerceAtLeast(0)
+        }
+        flashStart = System.currentTimeMillis()
+        flashTimer.restart()
+    }
+
     /** Hintergrundaufgaben der Session - nur solange sie läuft (mit ihr enden auch die Aufgaben). */
     private fun backgroundTasks(): Collection<String> {
         val id = sessionId ?: return emptyList()
@@ -2408,7 +2628,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         val tasks = backgroundTasks().size
         // Offene Karte zu einer Freigabe/Frage dieser Session: Sie ersetzt die Ja/Nein-Leiste unten (beides zugleich verwirrte).
         val askCard = id != null && HandoffService.getInstance(project).proposals.any { it.isPending && it.askSession == id }
-        val key = listOf(id, shellOnly, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks, askCard).joinToString("|")
+        val attached = attachments()
+        val key = listOf(id, shellOnly, waiting?.at, waiting?.listening, working?.since, terminal, canSend, wasSent, tasks, askCard, attached.size, filesOpen, filesPanel.count).joinToString("|")
         if (key == stateKey) return
         stateKey = key
 
@@ -2436,6 +2657,8 @@ private class SessionEditor(private val project: Project, private val file: Sess
         if (busy.isVisible != isBusy) { busy.isVisible = isBusy; conversation.revalidate(); if (isBusy) scrollToEnd() }
 
         headerLinks.removeAll()
+        // Dateien der Session (von Claude und von dir) als Seitenleiste ein- und ausblenden.
+        if (attached.isNotEmpty()) headerLinks.add(ActionLink(if (filesOpen) "Hide Files" else "Files (${filesPanel.count})") { toggleFiles() })
         if (tab != null && terminal) {
             if (working != null) headerLinks.add(ActionLink("Interrupt (Esc)") { SessionTerminals.keys(project, tab, "\u001b") })
             headerLinks.add(ActionLink("Show Terminal") { SessionTerminals.show(project, tab) })
@@ -2631,6 +2854,7 @@ private class SessionEditor(private val project: Project, private val file: Sess
         private const val MAX_ENTRIES = 300
         private const val STEPS_LINK = "handoff-steps:"
         private const val TOOL_LINK = "handoff-tool:"
+        private const val FILES_KEY = "handoff.files.open"
         private const val MORE_LINK = "handoff-more"
         private const val PROMPT_LINK = "handoff-prompt:"
         private const val RUN_LINK = "handoff-run:"

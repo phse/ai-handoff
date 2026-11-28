@@ -312,10 +312,16 @@ in a terminal tab in the background and opens the session in an editor tab:
 - Slash commands Claude suggests (on their own line or in backticks, e.g. `/compact …` or a skill) become links, also
   lines in code blocks: **▶** runs the command right away, a click on the command (with ↗) puts it into the prompt
   field without sending it.
-- Hover the header for everything at once: status, folder, model and effort, context use and each plan limit with its
-  reset time.
-- The header shows your plan limits (5 hours, week; reset times as tooltip) and, for the session that last updated the
-  status line, model and context use. Needs **Show Plan Limits…** from the Usage tab to be set up.
+- Hover the header for everything at once: status, folder, model and effort, and context use and each plan limit as a
+  bar - green, yellow from 60 %, red from 85 % - with reset time and time left.
+- The header shows your plan limits (5 hours, week) and, for the session that last updated the status line, model and
+  context use; the text turns yellow or red as they fill up. Needs **Show Plan Limits…** from the Usage tab to be set up.
+- **Files (N)** in the header opens a sidebar with every file of the session as a card with a preview: what Claude
+  wrote, edited or linked, and what you attached (@, pasted images, paths in the prompt) - each file once, newest first.
+  Filter by **All / Claude / You** and by type (**Images**, **Text & code**, **Other**); temp files are hidden unless
+  **Temp** is ticked. A click jumps to the last mention in the conversation and highlights it briefly (click again for
+  the one before), the arrow in the corner or a double-click opens the file, right-click offers **Reveal in Finder**,
+  **Copy Path** and more.
 - Links in Claude's messages open in the IDE: file paths (absolute or relative, with `:line`), also file names in
   code spans like `src/Foo.kt:12`, plain web addresses and existing absolute paths in the text; `settings:<Name>` opens a
   settings page, `action:<ActionId>` runs an IDE action. Right-click a link for **Reveal in Finder**, **Open in
